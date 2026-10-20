@@ -8,6 +8,13 @@ import {
   appendFact,
   appendMemory,
   appendNotebook,
+  canSpeak,
+  consumeSpeak,
+  enqueueSay,
+  inQuietHours,
+  readOutbox,
+  takeSay,
+  writeSpeak,
   dateOf,
   detectBodyProfile,
   discardFact,
@@ -203,4 +210,30 @@ test('节律：每次醒来记一行，且有上限', () => {
   fs.writeFileSync(file, Array.from({ length: PULSE_MAX_LINES + 10 }, (_, i) => `x ${i}`).join('\n') + '\n')
   pulseTick(root)
   assert.equal(fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).length, PULSE_MAX_LINES)
+})
+
+test('安静时段跨午夜也成立', () => {
+  assert.equal(inQuietHours(new Date('2026-10-20T23:30:00'), '23:00', '08:00'), true)
+  assert.equal(inQuietHours(new Date('2026-10-20T07:59:00'), '23:00', '08:00'), true)
+  assert.equal(inQuietHours(new Date('2026-10-20T12:00:00'), '23:00', '08:00'), false)
+})
+
+test('档位限制当日次数，跨日重置', () => {
+  const root = tmp()
+  writeSpeak(root, { level: 2, usedToday: 0, lastSpokeDate: null })
+  const t = new Date('2026-10-20T12:00:00')
+  assert.equal(canSpeak(root, t).ok, true)
+  consumeSpeak(root, t)
+  consumeSpeak(root, new Date('2026-10-20T12:01:00'))
+  assert.equal(canSpeak(root, new Date('2026-10-20T12:02:00')).ok, false)
+  // 第二天恢复
+  assert.equal(canSpeak(root, new Date('2026-10-21T12:00:00')).ok, true)
+})
+
+test('待发队列先进先出', () => {
+  const root = tmp()
+  enqueueSay(root, '第一条')
+  enqueueSay(root, '第二条')
+  assert.equal(takeSay(root).text, '第一条')
+  assert.equal(readOutbox(root).length, 1)
 })
