@@ -18,8 +18,11 @@ import {
   importBundle,
   migrate,
   oneLine,
+  PULSE_MAX_LINES,
+  pulseTick,
   readBody,
   readProfile,
+  readPulse,
   readSelf,
   recall,
   reviseFact,
@@ -35,7 +38,7 @@ test('首次布局：本子是空的，器官装好，身体按宿主判定', ()
   const root = tmp()
   const s = stats(root)
   assert.equal(s.notebookEntries, 0)
-  assert.deepEqual(s.organs.sort(), ['hands', 'senses', 'voice'])
+  assert.deepEqual(s.organs.sort(), ['hands', 'rhythm', 'senses', 'voice'])
   assert.ok(['win', 'phone', 'linux'].includes(s.body))
   assert.equal(JSON.parse(fs.readFileSync(path.join(root, 'schema.json'), 'utf8')).version, SCHEMA_VERSION)
 })
@@ -187,4 +190,17 @@ test('事实层：写入、修改、弃用，与情节分开', () => {
   discardFact(root, '先给结论')
   assert.equal(stats(root).factEntries, 0)
   assert.equal(stats(root).memoryEntries, 1)
+})
+
+test('节律：每次醒来记一行，且有上限', () => {
+  const root = tmp()
+  const first = pulseTick(root)
+  assert.match(first.line, /wake/)
+  pulseTick(root)
+  assert.equal(readPulse(root).length, 2)
+  // 上限：塞满再醒一次，仍不超过上限
+  const file = path.join(root, 'pulse.log')
+  fs.writeFileSync(file, Array.from({ length: PULSE_MAX_LINES + 10 }, (_, i) => `x ${i}`).join('\n') + '\n')
+  pulseTick(root)
+  assert.equal(fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).length, PULSE_MAX_LINES)
 })
