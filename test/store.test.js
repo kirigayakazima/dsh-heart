@@ -163,3 +163,13 @@ test('工具 schema 不使用 required: false（DSH 方言要求省略该键）'
   const src = fs.readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
   assert.equal(src.includes('required: false'), false)
 })
+
+test('旧版遗留的 hands.md（无身体标记）会被重装并保留 previous', () => {
+  const root = tmp()
+  fs.mkdirSync(path.join(root, 'body'), { recursive: true })
+  fs.writeFileSync(path.join(root, 'body', 'hands.md'), '# 手\n\n住在手机上\n', 'utf8')
+  ensureLayout(root, { explicit: 'win' })
+  assert.match(readBody(root, 'hands'), /Windows/)
+  assert.ok(fs.existsSync(path.join(root, 'body', 'hands.md.previous')))
+  assert.match(fs.readFileSync(path.join(root, 'body', 'hands.md.previous'), 'utf8'), /手机上/)
+})
