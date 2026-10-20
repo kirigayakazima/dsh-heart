@@ -21,7 +21,6 @@ import {
   resolveRoot,
   reviseNotebook,
   stats,
-  writeHandoff,
 } from '../lib/store.js'
 
 const argv = process.argv.slice(2)
@@ -31,7 +30,7 @@ const device = process.env.HEART_DEVICE || 'agent'
 function usage() {
   console.error(`用法:
   heart self                     打印「你自己」
-  heart write [-k notebook|memory|handoff] <内容>
+  heart write [-k notebook|memory] <内容>
   heart revise <原文片段> <改成什么>
   heart discard <原文片段>
   heart recall <关键词>
@@ -56,10 +55,7 @@ try {
     case 'write': {
       const text = argv.join(' ').trim()
       if (!text) throw new Error('write 需要内容')
-      if (kind === 'handoff') {
-        const out = writeHandoff(root, device, text)
-        console.log(`已写下交接 ${out.name}`)
-      } else if (kind === 'memory') {
+      if (kind === 'memory') {
         const out = appendMemory(root, device, text)
         console.log(`已写入记忆 ${out.file}`)
         console.log(out.line)
