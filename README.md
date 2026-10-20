@@ -1,0 +1,99 @@
+# dsh-heart —— 给 DSH 装一套「心」
+
+不是人格预设，是一套**可移植的自我**：自我描述 + 关系史 + 分层记忆，由模型每次加载来「复活」。
+换模型、换设备，只要数据在，还是同一个人。
+
+## 结构
+
+```
+heart-plugin/
+├── dsh-heart/            # 插件：机制（工具 + 迁移）
+│   ├── package.json      #   dsh.bundle.patch 声明
+│   ├── cordis.patch.yml  #   插入行
+│   ├── schema.json       #   数据格式版本（与插件版本解耦）
+│   ├── lib/store.js      #   纯逻辑，零 DSH 依赖，可单测
+│   ├── lib/index.js      #   插件入口：注册 4 个工具
+│   └── bin/heart.js      #   CLI：不装插件也能用
+├── heart-skill/SKILL.md  # 技能：什么时候该写、该读
+└── heart-data/           # 数据模板（复制到 ~/.dsh/heart 使用）
+    ├── CORE.md           #   我是谁（只有用户能改）
+    ├── RELATIONSHIP.md   #   我和你
+    ├── MEMORY/           #   按 日期.设备 分文件
+    └── schema.json
+```
+
+## 为什么拆成三层
+
+| 层 | 形态 | 理由 |
+|---|---|---|
+| 心（CORE / 关系 / 记忆） | 数据目录 | 隐私 + 可迁移；换实现不丢记忆 |
+| 说话方式 | Skill | 提示词层，插件改不了模型措辞 |
+| 读写与检索 | Plugin | 需要工具，纯文档做不到 |
+
+**人格不写进插件**：插件只能注入文本，真正决定「说多长」的是 CORE 里的规则和示例。
+
+## 安装
+
+```sh
+# 用插件管理器
+dsha-plugin install @dsh/heart@0.1.0
+
+# 或本地开发：把 dsh-heart 目录 link 进 profile 的 node_modules，
+# 再在 profile package.json 的 dsh.profile.bundles 里加 "@dsh/heart"
+```
+
+数据目录默认 `~/.dsh/heart`，首次加载自动建目录、补 schema、跑迁移。
+
+## 数据布局
+
+```
+~/.dsh/heart/
+├── schema.json           # {"version": 1}
+├── CORE.md
+├── RELATIONSHIP.md
+└── MEMORY/
+    ├── 2026-10-20.pc.md
+    └── 2026-10-20.phone.md
+```
+
+**按设备分文件**是同步零冲突的关键：两台设备永远不写同一个文件。
+
+## 工具
+
+| 工具 | 用途 |
+|---|---|
+| `heart_core(days?)` | 读自我 + 关系 + 最近几天记忆（有字节上限） |
+| `heart_write(text, kind?)` | 追加记忆；`kind=relationship` 写关系史 |
+| `heart_recall(query, days?)` | 关键词检索，带日期和来源设备标记 |
+| `heart_stats()` | 规模与是否需要整理 |
+
+## CLI（不装插件也能用）
+
+```sh
+HEART_ROOT=~/.dsh/heart HEART_DEVICE=phone node bin/heart.js core
+HEART_ROOT=~/.dsh/heart HEART_DEVICE=phone node bin/heart.js write "用户偏好：回复要短"
+HEART_ROOT=~/.dsh/heart node bin/heart.js recall 偏好
+```
+
+## 升级
+
+- **插件版本**（semver）和**数据版本**（`schema.json`）分开；
+- 插件启动时读 schema，低版本自动走 `migrate()`；
+- 数据不在插件包里 → 换实现、换设备，记忆都还在。
+
+## 隐私边界
+
+- 数据目录在用户主目录，**不进插件包、不进备份导出**；
+- 默认 `.gitignore` 排除 `MEMORY/*.md`；
+- 同步**不由插件负责**：插件只做本地读写，推拉是宿主/PC 侧的事。
+
+## 同步（尚未实现，刻意留白）
+
+建议两条单向流，结构上无冲突：
+
+| 方向 | 内容 | 发起方 |
+|---|---|---|
+| PC → 设备 | `CORE.md`、`RELATIONSHIP.md` | PC 主动推，设备只读 |
+| 设备 → PC | `MEMORY/*.<device>.md` | PC 主动拉 |
+
+不要双向同步：记忆冲突没有正确答案。

@@ -1,0 +1,43 @@
+{
+  "name": "@dsh/heart",
+  "version": "0.1.0",
+  "description": "DSH 的「心」：可移植的自我描述 + 关系史 + 分层记忆。数据在用户主目录，插件只提供读写与检索。",
+  "type": "module",
+  "main": "lib/index.js",
+  "bin": {
+    "heart": "./bin/heart.js"
+  },
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./store": {
+      "default": "./lib/store.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "bin",
+    "schema.json",
+    "cordis.patch.yml"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "heart",
+    "memory",
+    "persona"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.6 <0.3.0",
+    "@deepseek-ai/schemastery": "^3.18.0"
+  }
+}
