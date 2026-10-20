@@ -1,6 +1,6 @@
 {
   "name": "@dsh/heart",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "DSH 的「心」与「身体」：身体按宿主环境安装，心分三层（本子/事实/情节）。数据在用户主目录，插件只提供写入面。",
   "type": "module",
   "main": "lib/index.js",
@@ -10,6 +10,9 @@
   "exports": {
     ".": {
       "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
     },
     "./store": {
       "default": "./lib/store.js"
@@ -36,11 +39,12 @@
       "patch": "./cordis.patch.yml"
     },
     "client": {
+      "platform": "web",
+      "immediately": false,
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-slots"
-      ],
-      "platform": "web"
+      ]
     }
   },
   "peerDependencies": {
