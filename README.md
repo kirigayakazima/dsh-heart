@@ -66,6 +66,8 @@ dsha-plugin install github:kirigayakazima/dsh-heart
 | `heart_write(text, kind?)` | 追加记忆；`kind=relationship` 写关系史 |
 | `heart_recall(query, days?)` | 关键词检索，带日期和来源设备标记 |
 | `heart_stats()` | 规模与是否需要整理 |
+| `heart_export(path?)` | 打包成一个自包含 `.json.gz` |
+| `heart_import(path)` | 合并回来（记忆求并集，不覆盖 CORE） |
 
 ## CLI（不装插件也能用）
 
@@ -73,7 +75,35 @@ dsha-plugin install github:kirigayakazima/dsh-heart
 HEART_ROOT=~/.dsh/heart HEART_DEVICE=phone node bin/heart.js core
 HEART_ROOT=~/.dsh/heart HEART_DEVICE=phone node bin/heart.js write "用户偏好：回复要短"
 HEART_ROOT=~/.dsh/heart node bin/heart.js recall 偏好
+HEART_ROOT=~/.dsh/heart node bin/heart.js export /sdcard/heart-backup.json.gz
+HEART_ROOT=~/.dsh/heart node bin/heart.js import /sdcard/heart-backup.json.gz
 ```
+
+## 备份与恢复
+
+宿主的备份是**分档**的，这决定了「心」会不会跟着走：
+
+| 场景 | 包含 heart/ ？ |
+|---|---|
+| DSHA 全量备份（= 整个 `.dsh`） | ✅ 包含 |
+| 只对话 / 只设置 / 只插件（部分备份） | ❌ 不包含 |
+| 插件管理里的「导出插件」 | ❌ 只含源码，不含数据 |
+| 卸载应用重装 | ❌ 私有目录被清空 |
+
+所以插件自带导出：
+
+```sh
+heart export            # → heart-export-2026-10-20.json.gz
+heart import <文件>     # 合并回来
+```
+
+导入是**保守合并**：
+
+- 记忆文件按行求并集 —— 不丢本机行、也不产生重复；
+- `CORE.md` 与 `RELATIONSHIP.md` 已存在就跳过，**不会覆盖本机写的心**（`force` 才会）；
+- 从别的设备导回来，两边的记忆会并到一起，靠行首的 `[设备]` 标记区分来源。
+
+包里是明文 JSON（gzip 压缩），**拿到文件就等于拿到全部记忆**——存的时候注意位置，别随手丢在共享目录。
 
 ## 升级
 
