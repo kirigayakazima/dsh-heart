@@ -6,16 +6,16 @@
 ## 结构
 
 ```
-heart-plugin/
-├── dsh-heart/            # 插件：机制（工具 + 迁移）
-│   ├── package.json      #   dsh.bundle.patch 声明
-│   ├── cordis.patch.yml  #   插入行
-│   ├── schema.json       #   数据格式版本（与插件版本解耦）
-│   ├── lib/store.js      #   纯逻辑，零 DSH 依赖，可单测
-│   ├── lib/index.js      #   插件入口：注册 4 个工具
-│   └── bin/heart.js      #   CLI：不装插件也能用
-├── heart-skill/SKILL.md  # 技能：什么时候该写、该读
-└── heart-data/           # 数据模板（复制到 ~/.dsh/heart 使用）
+.                         # 仓库根目录 = npm 包本体
+├── package.json          # dsh.bundle.patch 声明 + peerDeps
+├── cordis.patch.yml      # 插入行
+├── schema.json           # 数据格式版本（与插件版本解耦）
+├── lib/store.js          # 纯逻辑，零 DSH 依赖，可单测
+├── lib/index.js          # 插件入口：注册 4 个工具
+├── bin/heart.js          # CLI：不装插件也能用
+├── test/store.test.js    # 8 项单测
+├── skill/SKILL.md        # 技能：什么时候该写、该读
+└── template/             # 数据模板（复制到 ~/.dsh/heart 使用）
     ├── CORE.md           #   我是谁（只有用户能改）
     ├── RELATIONSHIP.md   #   我和你
     ├── MEMORY/           #   按 日期.设备 分文件
@@ -35,11 +35,11 @@ heart-plugin/
 ## 安装
 
 ```sh
-# 用插件管理器
-dsha-plugin install @dsh/heart@0.1.0
+# 从 GitHub 安装（仓库根目录就是包）
+dsha-plugin install github:kirigayakazima/dsh-heart
 
-# 或本地开发：把 dsh-heart 目录 link 进 profile 的 node_modules，
-# 再在 profile package.json 的 dsh.profile.bundles 里加 "@dsh/heart"
+# 或本地开发：把本目录 link 进 profile 的 node_modules，
+# 再在 profile package.json 的 dsh.profile.bundles 里加包名
 ```
 
 数据目录默认 `~/.dsh/heart`，首次加载自动建目录、补 schema、跑迁移。
