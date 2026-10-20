@@ -5,10 +5,12 @@ import os from 'node:os'
 import path from 'node:path'
 import zlib from 'node:zlib'
 import {
+  appendFact,
   appendMemory,
   appendNotebook,
   dateOf,
   detectBodyProfile,
+  discardFact,
   discardNotebook,
   ensureLayout,
   exportBundle,
@@ -20,6 +22,7 @@ import {
   readProfile,
   readSelf,
   recall,
+  reviseFact,
   reviseNotebook,
   safeDevice,
   SCHEMA_VERSION,
@@ -172,4 +175,16 @@ test('旧版遗留的 hands.md（无身体标记）会被重装并保留 previou
   assert.match(readBody(root, 'hands'), /Windows/)
   assert.ok(fs.existsSync(path.join(root, 'body', 'hands.md.previous')))
   assert.match(fs.readFileSync(path.join(root, 'body', 'hands.md.previous'), 'utf8'), /手机上/)
+})
+
+test('事实层：写入、修改、弃用，与情节分开', () => {
+  const root = tmp()
+  appendFact(root, '用户希望回复简短')
+  appendMemory(root, 'pc', '今天修了插件')
+  assert.match(readSelf(root), /用户希望回复简短/)
+  reviseFact(root, '回复简短', '用户希望回复先给结论')
+  assert.match(fs.readFileSync(path.join(root, 'facts.md'), 'utf8'), /先给结论/)
+  discardFact(root, '先给结论')
+  assert.equal(stats(root).factEntries, 0)
+  assert.equal(stats(root).memoryEntries, 1)
 })
