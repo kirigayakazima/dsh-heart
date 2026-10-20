@@ -1,9 +1,0 @@
-# 记忆永远不进仓库。
-# 这一整套设计的出发点就是：数据不上云、不随插件包分发。
-MEMORY/*.md
-!MEMORY/README.md
-
-# 保险：任何凭据都不该出现在这里
-*.token
-*.key
-.credentials*
