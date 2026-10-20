@@ -8,6 +8,7 @@
 //   heart stats | export [文件] | import <文件> | migrate
 import fs from 'node:fs'
 import {
+  appendFact,
   appendMemory,
   appendNotebook,
   dateOf,
@@ -30,7 +31,7 @@ const device = process.env.HEART_DEVICE || 'agent'
 function usage() {
   console.error(`用法:
   heart self                     打印「你自己」
-  heart write [-k notebook|memory] <内容>
+  heart write [-k notebook|fact|memory] <内容>
   heart revise <原文片段> <改成什么>
   heart discard <原文片段>
   heart recall <关键词>
@@ -57,7 +58,11 @@ try {
       if (!text) throw new Error('write 需要内容')
       if (kind === 'memory') {
         const out = appendMemory(root, device, text)
-        console.log(`已写入记忆 ${out.file}`)
+        console.log(`已写入情节 ${out.file}`)
+        console.log(out.line)
+      } else if (kind === 'fact') {
+        const out = appendFact(root, text)
+        console.log(`已写入事实 ${out.file}`)
         console.log(out.line)
       } else {
         const out = appendNotebook(root, text)
