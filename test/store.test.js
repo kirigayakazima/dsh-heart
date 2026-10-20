@@ -153,3 +153,8 @@ test('导出的文件能被 exportBundleToFile 落盘并重新导入', () => {
   assert.ok(result.memoryFiles >= 1)
   assert.match(readCore(again), /往返测试/)
 })
+
+test('工具 schema 不使用 required: false（DSH 方言要求省略该键）', () => {
+  const src = fs.readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  assert.equal(src.includes('required: false'), false)
+})

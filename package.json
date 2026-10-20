@@ -1,6 +1,6 @@
 {
   "name": "@dsh/heart",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH 的「心」：可移植的自我描述 + 关系史 + 分层记忆。数据在用户主目录，插件只提供读写、检索与导出。",
   "type": "module",
   "main": "lib/index.js",
