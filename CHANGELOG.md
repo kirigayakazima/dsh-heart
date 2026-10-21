@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] - 2026-10-21
+
+### Fixed
+- **重启跨进程的 away 状态残留**：`applyPresence` 在 `isStartup` 首拍丢弃上一次进程的 `prev`。原先只跳过首拍触发，第二拍仍会把上次退出时的 `awaySince` 当成本次离开，隔天重启会误报“离开了 3000+ 分钟”。补单测后 40/40。
+
 ## [0.9.1] - 2026-10-21
 
 ### Fixed

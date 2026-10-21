@@ -131,6 +131,23 @@ test('applyPresence：进程启动时记录原始状态', () => {
   assert.equal(next.rawPresence, 'present')
 })
 
+test('applyPresence：重启首拍丢弃旧的 away 状态，避免隔天误触发', () => {
+  const stale = {
+    presence: 'away',
+    rawPresence: 'away',
+    at: '2026-10-19T10:00:00+08:00',
+    awaySince: '2026-10-19T09:00:00+08:00',
+  }
+  const sample = { at: '2026-10-21T20:00:00+08:00', idleMs: 1000, sinceMsgMin: 0 }
+  const next = applyPresence(stale, sample, {}, { isStartup: true })
+  assert.equal(next.presence, 'present')
+  assert.equal(next.awaySince, null)
+
+  const second = applyPresence(next, { ...sample, at: '2026-10-21T20:01:00+08:00' }, {})
+  assert.equal(second.presence, 'present')
+  assert.equal(second.awaySince, null)
+})
+
 test('formatSenseLine：输出格式稳定，错误行包含 error 字段', () => {
   const normal = {
     at: '2026-10-21T19:20:00+08:00',
