@@ -7,6 +7,7 @@ import {
   shouldTriggerReturned,
   shouldTriggerIdle,
   scheduleNextIdle,
+  recordIdleCategory,
   formatReturnedPrompt,
   formatIdlePrompt,
   createSelfMessage,
@@ -373,6 +374,47 @@ test('scheduleNextIdle：写 nextIdleAt，夹在 min–max', () => {
   assert.equal(readTrigger(root).nextIdleAt, low.nextIdleAt)
   const high = scheduleNextIdle(root, 999, config, at)
   assert.equal(high.minutes, 180)
+})
+
+test('类别额度：记一次、用完拒绝、跨日清零', () => {
+  const root = tmp()
+  const config = {
+    idleCategories: [
+      { id: 'bilibili', label: 'B站', dailyCap: 2 },
+      { id: 'study', label: '学习', dailyCap: 1 },
+    ],
+  }
+  const now = new Date('2026-10-21T22:00:00')
+  assert.equal(recordIdleCategory(root, 'bilibili', config, now).used, 1)
+  assert.equal(recordIdleCategory(root, 'bilibili', config, now).used, 2)
+  assert.equal(recordIdleCategory(root, 'bilibili', config, now).reason, 'category-cap')
+  assert.equal(recordIdleCategory(root, 'study', config, now).used, 1)
+  assert.equal(recordIdleCategory(root, 'study', config, now).reason, 'category-cap')
+  assert.equal(readTrigger(root).idleCategoryCounts.bilibili, 2)
+
+  const nextDay = new Date('2026-10-22T00:10:00')
+  const fresh = recordIdleCategory(root, 'bilibili', config, nextDay)
+  assert.equal(fresh.ok, true)
+  assert.equal(fresh.used, 1)
+})
+
+test('所有类别用完：shouldTriggerIdle 拒绝 category-cap', () => {
+  const now = new Date('2026-10-21T22:00:00')
+  const config = {
+    idleTurnMinutes: 6,
+    idleTurnMinMinutes: 6,
+    idleTurnDailyCap: 6,
+    idleCategories: [{ id: 'study', label: '学习', dailyCap: 1 }],
+  }
+  const base = { config, now, next: { presence: 'present', sinceMsgMin: 40 } }
+  const first = shouldTriggerIdle({ ...base, triggerState: {} })
+  assert.equal(first.ok, true)
+  assert.equal(first.remaining[0].remaining, 1)
+  const blocked = shouldTriggerIdle({
+    ...base,
+    triggerState: { idleCategoryDate: '2026-10-21', idleCategoryCounts: { study: 1 } },
+  })
+  assert.equal(blocked.reason, 'category-cap')
 })
 
 test('maybeTrigger：空闲时起一轮，记录配额，间隔内不再触发', async () => {

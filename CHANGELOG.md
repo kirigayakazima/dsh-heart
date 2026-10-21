@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.13.0] - 2026-10-21
+
+### Added
+- **空闲活动分品类**：`idleCategories` 默认 `B站 / 娱乐 / 学习 / 休息`，各自有每日上限；`heart_next(minutes, category)` 记一次并排下一次，额度用完会拒绝。
+- 所有类别都用完时，空闲触发直接 `category-cap`，不再空转烧 token；总数 `idleTurnDailyCap` 仍是总闸。
+- 设置页「心」面板新增额度编辑：总数、每类上限、增删类别，保存写入 `heart/config.json`；节律每拍重读，立即生效。
+- `GET /api/dsh-heart/state` 增加 `idle`；新增 `POST /api/dsh-heart/config`。
+- 单测 52/52。
+
 ## [0.12.0] - 2026-10-21
 
 ### Added
