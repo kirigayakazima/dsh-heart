@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.1] - 2026-10-21
+
+### Fixed
+- **手机端设备桥解析**：`/app/device` 实际返回 `{"result":"model=...\nscreen=on\n..."}`，之前把整个 JSON 当纯文本匹配，`screen`/`net` 经常拿不到。现在先解包 `result` 再解析 key=value，兼容纯文本和扁平 JSON；补 4 个单测（47/47）。
+
 ## [0.10.0] - 2026-10-21
 
 ### Added
