@@ -69,7 +69,7 @@ test('applyPresence：去抖机制避免单次波动', () => {
   assert.equal(next1.presence, 'present')
   assert.equal(next1.rawPresence, 'away')
 
-  // 第二次连续采样为 away：确认切换至 away
+  // 第二次连续采样为 away：确认切换至 away，并记录离开起点 awaySince
   const sampleAway2 = {
     at: '2026-10-21T14:02:00+08:00',
     idleMs: 560000,
@@ -78,6 +78,28 @@ test('applyPresence：去抖机制避免单次波动', () => {
   const next2 = applyPresence(next1, sampleAway2, { awayMinutes: 30 }, { now: day })
   assert.equal(next2.presence, 'away')
   assert.equal(next2.rawPresence, 'away')
+  assert.equal(next2.awaySince, '2026-10-21T14:02:00+08:00')
+
+  // 保持 away：awaySince 保留最早起点
+  const sampleAway3 = {
+    at: '2026-10-21T14:03:00+08:00',
+    idleMs: 620000,
+    sinceMsgMin: 42,
+  }
+  const next3 = applyPresence(next2, sampleAway3, { awayMinutes: 30 }, { now: day })
+  assert.equal(next3.presence, 'away')
+  assert.equal(next3.awaySince, '2026-10-21T14:02:00+08:00')
+
+  // 回到 present：awaySince 清空
+  const samplePresent = {
+    at: '2026-10-21T14:04:00+08:00',
+    idleMs: 0,
+    sinceMsgMin: 0,
+  }
+  // 模拟去抖后确认进入 present
+  const next4 = applyPresence({ ...next3, rawPresence: 'present' }, samplePresent, { awayMinutes: 30 }, { now: day })
+  assert.equal(next4.presence, 'present')
+  assert.equal(next4.awaySince, null)
 })
 
 test('applyPresence：PowerShell 采样失败不误判离开', () => {

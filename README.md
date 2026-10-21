@@ -81,17 +81,25 @@ node bin/sense.js     # 采一次环境样本并打印 JSON（无需启动 DSH�
 1. **环境感知（sense）**：
    - 每 60 秒采样一次：系统空闲时间（`idleMs`）、前台应用（`fg`）、最新会话活跃时间（`sinceMsgMin`）。
    - 判定四种状态：`asleep`（深夜 23:00–08:00）、`present`（空闲 ≤ 2 分钟或 5 分钟内发过消息）、`nearby`（离开 ≤ 30 分钟）、`away`（离开）。
+   - 离开时间戳（`awaySince`）：进入 `away`/`asleep` 时记录起始时间，回到 `present` 时清空，确保离开时长计算精准。
    - 去抖保护：状态连续两次采样一致才切换，单次采样失败绝不误判“离开”。
    - 数据落盘：最新状态写入 `~/.dsh/heart/sense.json`（原子写入），历史追加写 `~/.dsh/heart/sense.log`（环形 500 行）。
 2. **主动开口（trigger）**：
-   - `returned`：用户离开 ≥ `awayMinutes`（默认 30 分钟）后回来，主动触发一轮 `agent.followup`，由模型根据当前上下文自然开口。
-   - 边界守护：深夜静默时段不打扰；带 `triggerCooldownMinutes`（默认 360 分钟）冷却，防止频繁刷屏；队列送货与感知触发互斥。
+   - `returned`：用户离开 ≥ `awayMinutes`（默认 30 分钟）后回来，根据 `awaySince` 计算真实离开时长，主动触发一轮 `agent.followup`，由模型根据当前上下文自然开口。
+   - 重启保护：插件启动后首个 tick 只记录不触发；若 `prev.at` 距今超过 3 个节律周期，判定为中断重启，杜绝拿历史旧数据误触发。
+   - 边界守护：深夜静默时段不打扰（以 `speak.json` 规则为准）；带 `triggerCooldownMinutes`（默认 360 分钟）冷却，防止频繁刷屏；队列送货与感知触发互斥。
    - 目标会话定位：按 session 文件最新 `mtime` 定位用户正在查看的活跃窗口，找不到或并列时继续等待，绝不盲目投退给 `list()[0]`。
 
-## 安装
+## 安装与测试
 
 ```sh
-dsha-plugin install github:kirigayakazima/dsh-heart
+# 本地测试安装（桌面 profile 基于 pnpm 管理）
+cd ~/.dsh/profiles/desktop
+pnpm add file:D:/CodePackage/DSHA/heart-plugin
+
+# 回滚到 0.8.3
+cd ~/.dsh/profiles/desktop
+pnpm add github:kirigayakazima/dsh-heart#ab8feb6
 ```
 
 装完重启 Web 才生效。数据目录默认 `~/.dsh/heart`，首次加载按宿主环境装身体、建空本子。

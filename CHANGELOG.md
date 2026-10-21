@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2026-10-21
+
+### Fixed
+- **离开时长精确化**：在 `sense.json` 中维护 `awaySince` 离开起点时间戳，`shouldTriggerReturned` 严格以离开起点计算时长，彻底解决离开后打字（`sinceMsgMin=0`）漏判或沉默后离开短时间误判的问题。
+- **重启防误判机制**：`applyPulse` 首次唤醒只写状态不触发；若 `prev.at` 距当前时间超过 3 个节律周期，判定为中断重启（`startup`），防止加载旧状态误触发 `returned`。
+- **安静时段统一**：`applyPresence` 与 `shouldTriggerReturned` 统一读取 `speak.json` 的 `quietFrom` / `quietTo`，消灭两套规则不一致。
+- **前台窗口空闲净化**：Windows 采样过滤 `Idle |` 等无前台窗口伪进程，规范日志与状态展示。
+- **模块解耦与性能优化**：
+  - 将 `getSinceMsgMin` 收归 `lib/sense.js`，解除 `sense-phone` 对 `sense-win` 的不合理依赖。
+  - 手机端精简掉沉重的 `dumpsys power`（省去 224KB/5min 读盘开销）。
+  - 为 `findSessionMtimes` 增加 10 秒短期缓存，同一 tick 内避免重复全量遍历 200+ 会话文件。
+
 ## [0.9.0] - 2026-10-21
 
 ### Added
