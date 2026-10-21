@@ -5,7 +5,9 @@ import os from 'node:os'
 import path from 'node:path'
 import {
   shouldTriggerReturned,
+  shouldTriggerIdle,
   formatReturnedPrompt,
+  formatIdlePrompt,
   createSelfMessage,
   maybeTrigger,
   readTrigger,
@@ -296,4 +298,100 @@ test('maybeTrigger 触发开口、记录状态并防止重复触发', async () =
   // 冷却内再次调用 -> 不触发
   const okAgain = await maybeTrigger(ctx, root, prev, next, config)
   assert.equal(okAgain, false)
+})
+
+test('shouldTriggerIdle：空闲条件、安静时段、配额与间隔', () => {
+  const now = new Date('2026-10-21T14:00:00')
+  const base = {
+    triggerState: {},
+    config: { idleTurnMinutes: 30, idleTurnDailyCap: 3, idleTurnGapMinutes: 60 },
+    now,
+  }
+
+  // 以“多久没消息”为准：他在电脑前但没说话，也算空闲
+  assert.equal(
+    shouldTriggerIdle({ ...base, next: { presence: 'present', sinceMsgMin: 40 } }).ok,
+    true
+  )
+  assert.equal(
+    shouldTriggerIdle({ ...base, next: { presence: 'nearby', sinceMsgMin: 10 } }).reason,
+    'too-soon'
+  )
+  assert.equal(
+    shouldTriggerIdle({ ...base, next: { presence: 'away', sinceMsgMin: 40 } }).ok,
+    true
+  )
+  // idleMs 再大，只要刚说过话也不触发；手机熄屏时 idleMs 为 null 也走 sinceMsg
+  assert.equal(
+    shouldTriggerIdle({
+      ...base,
+      config: { ...base.config, idleTurnMinutes: 2 },
+      next: { presence: 'present', idleMs: 130000, sinceMsgMin: 1 },
+    }).reason,
+    'too-soon'
+  )
+  assert.equal(
+    shouldTriggerIdle({
+      ...base,
+      now: new Date('2026-10-21T23:30:00'),
+      next: { presence: 'away', sinceMsgMin: 40 },
+      speakState: { quietFrom: '23:00', quietTo: '08:00' },
+    }).reason,
+    'quiet-hours'
+  )
+  assert.equal(
+    shouldTriggerIdle({
+      ...base,
+      triggerState: { idleDate: '2026-10-21', idleCount: 3 },
+      next: { presence: 'away', sinceMsgMin: 40 },
+    }).reason,
+    'daily-cap'
+  )
+  assert.equal(
+    shouldTriggerIdle({
+      ...base,
+      triggerState: { lastIdleTurnAt: new Date(now.getTime() - 10 * 60000).toISOString() },
+      next: { presence: 'away', sinceMsgMin: 40 },
+    }).reason,
+    'gap'
+  )
+  assert.ok(formatIdlePrompt(40, now).includes('你一个人'))
+})
+
+test('maybeTrigger：空闲时起一轮，记录配额，间隔内不再触发', async () => {
+  const root = tmp()
+  const sessionsRoot = path.join(root, 'sessions')
+  const dirA = path.join(sessionsRoot, 'ws', 'session-idle')
+  fs.mkdirSync(dirA, { recursive: true })
+  fs.writeFileSync(path.join(dirA, 'session.v4.jsonl.zstd'), 'active-session')
+
+  let followedUp = null
+  const agent = {
+    id: 'session-idle',
+    followup: (msg) => {
+      followedUp = msg
+    },
+  }
+  const ctx = { agents: { list: () => [agent] } }
+  const config = {
+    sessionsRoot,
+    idleTurnMinutes: 30,
+    idleTurnDailyCap: 3,
+    idleTurnGapMinutes: 60,
+  }
+  const prev = { presence: 'nearby', at: new Date(Date.now() - 60000).toISOString() }
+  const next = { presence: 'away', sinceMsgMin: 40 }
+
+  const ok = await maybeTrigger(ctx, root, prev, next, config)
+  assert.equal(ok, true)
+  assert.ok(followedUp)
+  assert.ok(followedUp.content[0].text.includes('你一个人'))
+
+  const state = readTrigger(root)
+  assert.equal(state.lastEvent, 'idle')
+  assert.equal(state.idleCount, 1)
+  assert.ok(state.lastIdleTurnAt)
+
+  // 间隔内再次调用 -> 不触发
+  assert.equal(await maybeTrigger(ctx, root, prev, next, config), false)
 })

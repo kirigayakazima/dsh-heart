@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.0] - 2026-10-21
+
+### Added
+- **空闲自主回合**：她一个人待着时，允许模型自己起一轮。条件：presence 是 `nearby`/`away`、距上次消息 ≥ `idleTurnMinutes`（默认 30）、不在安静时段、当日未超 `idleTurnDailyCap`（6）、距上次空闲回合 ≥ `idleTurnGapMinutes`（60）。触发后走 `agent.followup`，提示词是「你一个人…想干点什么就干，不用等指令」。
+- 触发优先级：`returned`（他回来）优先，其次 `idle`（他不在）。
+- 配套单测：空闲条件、安静时段、配额、间隔、实际起一轮并记录 `trigger.json`（49/49）。
+
 ## [0.10.1] - 2026-10-21
 
 ### Fixed
