@@ -96,6 +96,18 @@ dsha-plugin install github:kirigayakazima/dsh-heart
 插件版本（semver）与数据版本（`schema.json`）解耦，启动时自动迁移。
 v1/v2 的 `CORE.md` / `RELATIONSHIP.md` 会改名成 `legacy-*` 保留；`handoff/` 目录不再使用。
 
+## 发版
+
+版本号只认 `package.json` 的 `version`；tag 打在「版本号首次变成该值」的那个提交上：
+
+1. 改 `package.json` 的 `version`，提交；
+2. `git tag -a vX.Y.Z -m "vX.Y.Z"`；
+3. `git push origin main --follow-tags`。
+
+历史标签已从 `v0.1.0` 补齐（共 23 个），可以直接 `git checkout v0.7.11` 看任意一版。
+唯一的跳号是 `v0.7.7`：当时从 0.7.6 直接到了 0.7.8，不是漏打。
+`v0.8.1` 对应的提交带一个已知缺陷（开口时把裸字符串写进会话日志，会让会话加载失败），修复合在 `v0.8.2`——要用开口功能，别从 `v0.8.1` 检出。
+
 ## 隐私
 
 - 数据在用户主目录，不进插件包、不进插件导出；
