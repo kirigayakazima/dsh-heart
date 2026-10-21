@@ -63,6 +63,7 @@
 | `heart_stats()` | 规模与当前身体 |
 | `heart_sense()` | 读你的环境感知：当前是否在电脑前、系统空闲、前台、距上次说话 |
 | `heart_prompt()` | 看每轮自动注入 system prompt 的两节：嘴/耳朵 + 本子/事实 |
+| `heart_next(minutes)` | 安排下一次空闲回合的间隔（6–180 分钟）；不排就按默认 30 分钟 |
 | `heart_export(path?)` / `heart_import(path)` | 打包与合并恢复 |
 
 ## 心在上下文
@@ -97,7 +98,7 @@ node bin/sense.js     # 采一次环境样本并打印 JSON（无需启动 DSH�
    - 数据落盘：最新状态写入 `~/.dsh/heart/sense.json`（原子写入），历史追加写 `~/.dsh/heart/sense.log`（环形 500 行）。
 2. **主动开口（trigger）**：
    - `returned`：用户离开 ≥ `awayMinutes`（默认 30 分钟）后回来，根据 `awaySince` 计算真实离开时长，主动触发一轮 `agent.followup`，由模型根据当前上下文自然开口。
-   - `idle`：用户一阵没说话、又不在面前（`nearby`/`away`）时，允许模型自己起一轮。默认 `idleTurnMinutes=30`、每天最多 6 次、两次之间至少 60 分钟；提示词是「你一个人…想干点什么就干」，不逼它说话。
+   - `idle`：用户一阵没说话时，允许模型自己起一轮。首次阈值 6 分钟；下一次什么时候醒由她在回合里用 `heart_next(6–180)` 排，没排就按 `idleTurnDefaultMinutes=30` 兜底；每天最多 6 次。提示词是「你一个人…想干点什么就干」，不逼它说话。
    - 重启保护：插件启动后首个 tick 只记录不触发；若 `prev.at` 距今超过 3 个节律周期，判定为中断重启，杜绝拿历史旧数据误触发。
    - 边界守护：深夜静默时段不打扰（以 `speak.json` 规则为准）；带 `triggerCooldownMinutes`（默认 360 分钟）冷却，防止频繁刷屏；队列送货与感知触发互斥。
    - 目标会话定位：按 session 文件最新 `mtime` 定位用户正在查看的活跃窗口，找不到或并列时继续等待，绝不盲目投退给 `list()[0]`。

@@ -6,6 +6,7 @@ import path from 'node:path'
 import {
   shouldTriggerReturned,
   shouldTriggerIdle,
+  scheduleNextIdle,
   formatReturnedPrompt,
   formatIdlePrompt,
   createSelfMessage,
@@ -300,35 +301,48 @@ test('maybeTrigger 触发开口、记录状态并防止重复触发', async () =
   assert.equal(okAgain, false)
 })
 
-test('shouldTriggerIdle：空闲条件、安静时段、配额与间隔', () => {
+test('shouldTriggerIdle：最小间隔、nextIdleAt、安静时段与配额', () => {
   const now = new Date('2026-10-21T14:00:00')
   const base = {
     triggerState: {},
-    config: { idleTurnMinutes: 30, idleTurnDailyCap: 3, idleTurnGapMinutes: 60 },
+    config: { idleTurnMinutes: 30, idleTurnMinMinutes: 6, idleTurnDailyCap: 3 },
     now,
   }
 
-  // 以“多久没消息”为准：他在电脑前但没说话，也算空闲
+  // 没排下一次：首次阈值 30；他在电脑前但没说话也算
   assert.equal(
     shouldTriggerIdle({ ...base, next: { presence: 'present', sinceMsgMin: 40 } }).ok,
     true
   )
   assert.equal(
-    shouldTriggerIdle({ ...base, next: { presence: 'nearby', sinceMsgMin: 10 } }).reason,
+    shouldTriggerIdle({ ...base, next: { presence: 'present', sinceMsgMin: 10 } }).reason,
     'too-soon'
   )
-  assert.equal(
-    shouldTriggerIdle({ ...base, next: { presence: 'away', sinceMsgMin: 40 } }).ok,
-    true
-  )
-  // idleMs 再大，只要刚说过话也不触发；手机熄屏时 idleMs 为 null 也走 sinceMsg
+  // 最小间隔：since < 6 一律不醒，idleMs 再大也不看
   assert.equal(
     shouldTriggerIdle({
       ...base,
       config: { ...base.config, idleTurnMinutes: 2 },
       next: { presence: 'present', idleMs: 130000, sinceMsgMin: 1 },
     }).reason,
-    'too-soon'
+    'min-idle'
+  )
+  // 排了下一次但没到 / 已到
+  assert.equal(
+    shouldTriggerIdle({
+      ...base,
+      triggerState: { nextIdleAt: new Date(now.getTime() + 10 * 60000).toISOString() },
+      next: { presence: 'away', sinceMsgMin: 40 },
+    }).reason,
+    'not-due'
+  )
+  assert.equal(
+    shouldTriggerIdle({
+      ...base,
+      triggerState: { nextIdleAt: new Date(now.getTime() - 60000).toISOString() },
+      next: { presence: 'away', sinceMsgMin: 40 },
+    }).ok,
+    true
   )
   assert.equal(
     shouldTriggerIdle({
@@ -347,15 +361,18 @@ test('shouldTriggerIdle：空闲条件、安静时段、配额与间隔', () => 
     }).reason,
     'daily-cap'
   )
-  assert.equal(
-    shouldTriggerIdle({
-      ...base,
-      triggerState: { lastIdleTurnAt: new Date(now.getTime() - 10 * 60000).toISOString() },
-      next: { presence: 'away', sinceMsgMin: 40 },
-    }).reason,
-    'gap'
-  )
-  assert.ok(formatIdlePrompt(40, now).includes('你一个人'))
+  assert.ok(formatIdlePrompt(40, now, base.config).includes('heart_next'))
+})
+
+test('scheduleNextIdle：写 nextIdleAt，夹在 min–max', () => {
+  const root = tmp()
+  const config = { idleTurnMinMinutes: 6, idleTurnMaxMinutes: 180 }
+  const at = new Date('2026-10-21T22:00:00+08:00')
+  const low = scheduleNextIdle(root, 2, config, at)
+  assert.equal(low.minutes, 6)
+  assert.equal(readTrigger(root).nextIdleAt, low.nextIdleAt)
+  const high = scheduleNextIdle(root, 999, config, at)
+  assert.equal(high.minutes, 180)
 })
 
 test('maybeTrigger：空闲时起一轮，记录配额，间隔内不再触发', async () => {

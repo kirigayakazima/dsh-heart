@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.12.0] - 2026-10-21
+
+### Added
+- **下一次空闲回合由模型自己排**：新增 `heart_next(minutes)`，在 6–180 分钟之间设置 `nextIdleAt`；空闲回合的提示词会提醒她用。没排就按 `idleTurnDefaultMinutes`（30）兜底。
+- 空闲触发改为看 `nextIdleAt` + `idleTurnMinMinutes`（默认 6 分钟）：不再用固定 gap。她可以在 6 分钟后再来搭话，也可以判断“现在没什么事”排到 60 分钟后。
+- 配置：`idleTurnMinMinutes`、`idleTurnDefaultMinutes`、`idleTurnMaxMinutes`；`idleTurnGapMinutes` 退役。
+- 单测 50/50。
+
 ## [0.11.0] - 2026-10-21
 
 ### Added
