@@ -62,7 +62,18 @@
 | `heart_body(organ)` | 读器官：`voice` / `senses` / `hands` |
 | `heart_stats()` | 规模与当前身体 |
 | `heart_sense()` | 读你的环境感知：当前是否在电脑前、系统空闲、前台、距上次说话 |
+| `heart_prompt()` | 看每轮自动注入 system prompt 的两节：嘴/耳朵 + 本子/事实 |
 | `heart_export(path?)` / `heart_import(path)` | 打包与合并恢复 |
+
+## 心在上下文
+
+从 0.10.0 起，插件把心她自己写的内容放回每轮系统提示（`systemPrompt.section`）：
+
+- `heart:voice`（order 50）：`body/voice.md` + `body/senses.md` —— 她自己的嘴和耳朵；
+- `heart:self`（order 55）：本子最近 6 条 + 事实最近 12 条。
+
+每轮装配时现读文件，空文件自动跳过。内容是她的，不是插件生成的人设。
+配置：`injectPrompt`（默认 true）、`promptNotebookLines`（6）、`promptFactsLines`（12）、`promptFacts`（true）。
 
 ## CLI
 

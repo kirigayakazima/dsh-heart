@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2026-10-21
+
+### Added
+- **把「心」放回每轮上下文**：`inject` 增加 `systemPrompt`，注册两节：
+  - `heart:voice`（order 50）：`body/voice.md` + `body/senses.md`，她自己的嘴和耳朵；
+  - `heart:self`（order 55）：本子最近 N 条 + 事实最近 M 条。
+  每轮装配时现读文件；空文件自动跳过。不是人设，是把她写下的东西读给她听。
+- 新工具 `heart_prompt`：查看这两节的实际内容与长度，方便验证。
+- 新配置：`injectPrompt`（默认 true）、`promptNotebookLines`（6）、`promptFactsLines`（12）、`promptFacts`（true）。
+
 ## [0.9.2] - 2026-10-21
 
 ### Fixed
