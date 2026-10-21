@@ -237,3 +237,13 @@ test('待发队列先进先出', () => {
   assert.equal(takeSay(root).text, '第一条')
   assert.equal(readOutbox(root).length, 1)
 })
+
+test('待发条目记住说这句话的窗口', () => {
+  const root = tmp()
+  enqueueSay(root, '在窗口 A 说的', 'delivery', 'session-aaa')
+  const [item] = readOutbox(root)
+  assert.equal(item.session, 'session-aaa')
+  // 没给窗口的旧式条目保持原样，投递时再退回全局目标
+  enqueueSay(root, '不知道在哪个窗口说的')
+  assert.equal(readOutbox(root)[1].session, undefined)
+})
