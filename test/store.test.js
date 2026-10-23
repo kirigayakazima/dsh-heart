@@ -24,6 +24,7 @@ import {
   exportBundleToFile,
   importBundle,
   migrate,
+  migrateProvenance,
   oneLine,
   PULSE_MAX_LINES,
   pulseTick,
@@ -100,7 +101,42 @@ test('记忆按 日期.设备 分文件', () => {
   const b = appendMemory(root, 'phone', '第二条')
   assert.notEqual(a.file, b.file)
   assert.ok(a.file.endsWith(`${dateOf()}.pc.md`))
-  assert.match(a.line, /^- \d{2}:\d{2} \[pc\] 第一条$/)
+  assert.match(a.line, /^- \d{2}:\d{2} \[pc\] 第一条 · src=unknown$/)
+})
+
+test('记忆带上出处：有会话就记会话，没有就 unknown', () => {
+  const root = tmp()
+  const withSrc = appendMemory(root, 'pc', '有出处的一条', new Date(), 'session-abc123')
+  assert.match(withSrc.line, / · src=session-abc123$/)
+  const noSrc = appendMemory(root, 'pc', '没出处的一条')
+  assert.match(noSrc.line, / · src=unknown$/)
+  // 脏值不许进记忆，也不许拿它当出处
+  const dirty = appendMemory(root, 'pc', '脏出处', new Date(), 'session abc\n第二行')
+  assert.match(dirty.line, / · src=unknown$/)
+})
+
+test('旧记忆补 unknown：只加标记，不改正文，幂等', () => {
+  const root = tmp()
+  ensureLayout(root)
+  const file = path.join(root, 'MEMORY', `${dateOf()}.pc.md`)
+  fs.writeFileSync(file, '- 22:09 [pc] 老的一条\n- 22:10 [pc] 老的两条\n', 'utf8')
+
+  const first = migrateProvenance(root)
+  assert.equal(first.lines, 2)
+  const body = fs.readFileSync(file, 'utf8')
+  assert.match(body, /^- 22:09 \[pc\] 老的一条 · src=unknown$/m)
+  assert.match(body, /^- 22:10 \[pc\] 老的两条 · src=unknown$/m)
+
+  const second = migrateProvenance(root)
+  assert.equal(second.lines, 0, '第二次不该再动')
+  assert.equal(fs.readFileSync(file, 'utf8'), body)
+})
+
+test('迁移不会把已有出处覆盖成 unknown', () => {
+  const root = tmp()
+  appendMemory(root, 'pc', '有出处', new Date(), 'session-keepme')
+  migrateProvenance(root)
+  assert.match(fs.readFileSync(appendMemory(root, 'pc', '再写一条').file, 'utf8'), /session-keepme/)
 })
 
 test('检索命中关键词，不命中返回 0', () => {

@@ -49,13 +49,14 @@
 
 - **本子永远不由插件生成内容**——首次运行只创建空本子。
 - **记忆按设备分文件**，两台设备永不写同一个文件。
+- **每条记忆带出处**：写的时候在行尾追加 `· src=<会话 id>`；拿不到会话就写 `src=unknown`。旧记忆在启动时补 `src=unknown`——只加标记，不改正文，不反推。
 
 ## 工具
 
 | 工具 | 作用 |
 |---|---|
 | `heart_self(days?)` | 读「你自己」：本子 + 最近几天记忆 |
-| `heart_write(text, kind?)` | 写入：`notebook`（本子）/ `memory`（记忆） |
+| `heart_write(text, kind?)` | 写入：`notebook`（本子）/ `memory`（记忆，自动带出处） |
 | `heart_revise(match, replacement)` | 改本子里的一条 |
 | `heart_discard(match)` | 弃用本子里的一条 |
 | `heart_recall(query, days?)` | 检索记忆 |
@@ -65,6 +66,20 @@
 | `heart_prompt()` | 看每轮自动注入 system prompt 的两节：嘴/耳朵 + 本子/事实 |
 | `heart_next(minutes, category?)` | 安排下一次空闲回合（6–180 分钟），并记一次类别；额度用完会拒绝 |
 | `heart_export(path?)` / `heart_import(path)` | 打包与合并恢复 |
+
+## 记忆的出处
+
+记忆行的形状：
+
+```
+- 22:09 [agent] 说了什么 · src=session-da5b2a27-9e0f-4312-a473-79c37b9de966
+- 22:52 [agent] 旧的一条 · src=unknown
+```
+
+- `src` 是写这条记忆时所在的会话 id，能顺着会话日志追到原文。
+- 子代理写的记忆记的是它自己的会话，不会冒充主会话。
+- **不反推**：来源不明的就是 `unknown`。拿不到会话 id 时也写 `unknown`，不拿设备名或日期凑。
+- 老记忆由 `migrate()` 在启动时补标记，幂等；正文一个字不动。
 
 ## 心在上下文
 

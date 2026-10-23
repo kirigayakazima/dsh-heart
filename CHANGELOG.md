@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.14.0] - 2026-10-23
+
+### Added
+- **记忆出处**：`heart_write(kind=memory)` 在行尾记 `· src=<会话 id>`，能顺着会话日志追到原文；拿不到会话就写 `src=unknown`。
+- **旧记忆补标记**：`migrate()` 启动时给没有出处的历史记忆补 `· src=unknown`，幂等、只加标记不改正文、不反推。
+- `normalizeSrc()`：出处只收安全字符，脏值（带空格/换行）一律降级成 `unknown`，不让一行记忆被写坏。
+- 单测 27/27（store），全部 6 个测试文件通过。
+
 ## [0.13.0] - 2026-10-21
 
 ### Added
