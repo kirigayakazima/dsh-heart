@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.2] - 2026-10-23
+
+### Fixed
+- `via` 在对话里被误记成 `unknown`：内存里的会话消息拿不到，改成从会话日志倒着解 zstd 帧、
+  找最后一条真正的 user 消息。宿主注入的 `time-context` / `runtime-context` / `skill-catalog` 跳过，
+  只认 `user`（→ chat）和 `schedule`（→ self）。
+- 会话日志是多帧 zstd 拼接，Node 的流式解压只吃第一帧，这里按 magic 切帧逐帧解。
+- 新增 `kindFromSessionText()` / `viaOfSourceKind()` / `zstdFrameStarts()`，都有单测。
+- 代价：写一条记忆多约 0.17 秒（解尾部帧，找到即停）。
+
 ## [0.15.1] - 2026-10-23
 
 ### Added

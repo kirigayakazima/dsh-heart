@@ -82,7 +82,9 @@
   `heart/src-index.json`（8 位 → 完整 uuid），`heart_trace("da5b2a27")` 直接换回来；
   或者拿它去 `<DSH_HOME>/sessions/**/` 里 grep。
 - `via`：这一回合是谁起的——`chat`（用户发的话）/ `self`（插件自己 followup 进来的空闲回合或分发消息）/
-  `unknown`（认不出）。判据是会话里最后一条 user 消息的 `source.kind`，不猜。
+  `unknown`（认不出）。判据是从会话日志里倒着找第一条真正的 user 消息，看它的 `source.kind`：
+  `user` → chat，`schedule` → self。`time-context` / `runtime-context` / `skill-catalog` 这些宿主注入的消息跳过，
+  它们不是人说的话。日志读不到就退回内存里的会话消息，再读不到就 unknown——不猜。
 - **不反推**：拿不到会话 id 或认不出触发方式，一律 `unknown`；不用设备名、日期去凑。
 - 老记忆由 `migrate()` 在启动时补 `· src:unknown via:unknown`：幂等、只加标记、正文一个字不动。
 - 脏值（带空格、换行等）在 `normalizeSrc()` 降级成 `unknown`，不让一行记忆被写坏。

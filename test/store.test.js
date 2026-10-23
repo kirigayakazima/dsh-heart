@@ -37,7 +37,8 @@ import {
   reviseNotebook,
   safeDevice,
   shortSessionId,
-  viaOfTurnMessages,
+  kindFromSessionText,
+  viaOfSourceKind,
   traceSrc,
   readSrcIndex,
   SCHEMA_VERSION,
@@ -155,22 +156,24 @@ test('迁移不会把已有出处覆盖成 unknown', () => {
   assert.match(body, /src:keepme12 via:chat/)
 })
 
-test('触发方式看最后一条 user 消息的 source.kind', () => {
-  assert.equal(viaOfTurnMessages([]), 'unknown')
-  assert.equal(viaOfTurnMessages(undefined), 'unknown')
-  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'user' } }]), 'chat')
-  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'schedule' } }]), 'self')
-  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'plugin' } }]), 'self')
-  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'system' } }]), 'unknown')
-  // 只看最后一条 user 消息，中间的 assistant/tool 不算
+test('触发方式从会话日志判断，跳过宿主注入的消息', () => {
+  const line = (kind) =>
+    JSON.stringify({ type: 'user/message', data: { role: 'user', source: { kind } } })
+  const join = (...parts) => parts.join(String.fromCharCode(10))
+  // 真实用户消息后面会跟 time-context / runtime-context / skill-catalog，跳过它们
+  assert.equal(kindFromSessionText(join(line('user'), line('time-context'))), 'user')
   assert.equal(
-    viaOfTurnMessages([
-      { role: 'user', source: { kind: 'schedule' } },
-      { role: 'assistant', content: [] },
-      { role: 'user', source: { kind: 'user' } },
-    ]),
-    'chat',
+    kindFromSessionText(join(line('schedule'), line('runtime-context'), line('time-context'))),
+    'schedule',
   )
+  assert.equal(kindFromSessionText(join(line('time-context'), line('skill-catalog'))), '')
+  assert.equal(kindFromSessionText(''), '')
+  // 被帧切断的半截行不算证据
+  assert.equal(kindFromSessionText('{"type":"user/message","data":{"sour'), '')
+
+  assert.equal(viaOfSourceKind('user'), 'chat')
+  assert.equal(viaOfSourceKind('schedule'), 'self')
+  assert.equal(viaOfSourceKind('time-context'), 'unknown')
 })
 
 test('门牌本：8 位能换回完整会话 id', () => {
