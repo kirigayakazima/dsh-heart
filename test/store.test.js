@@ -38,6 +38,8 @@ import {
   safeDevice,
   shortSessionId,
   viaOfTurnMessages,
+  traceSrc,
+  readSrcIndex,
   SCHEMA_VERSION,
   stats,
 } from '../lib/store.js'
@@ -169,6 +171,36 @@ test('触发方式看最后一条 user 消息的 source.kind', () => {
     ]),
     'chat',
   )
+})
+
+test('门牌本：8 位能换回完整会话 id', () => {
+  const root = tmp()
+  appendMemory(root, 'pc', '这条有账', new Date(), {
+    src: 'da5b2a27',
+    via: 'chat',
+    session: 'session-da5b2a27-9e0f-4312-a473-79c37b9de966',
+  })
+  const index = readSrcIndex(root)
+  assert.equal(index['da5b2a27'].session, 'da5b2a27-9e0f-4312-a473-79c37b9de966')
+  assert.equal(index['da5b2a27'].count, 1)
+
+  appendMemory(root, 'pc', '同一个会话又写一条', new Date(), {
+    src: 'da5b2a27',
+    via: 'chat',
+    session: 'session-da5b2a27-9e0f-4312-a473-79c37b9de966',
+  })
+  assert.equal(readSrcIndex(root)['da5b2a27'].count, 2)
+
+  const hit = traceSrc(root, 'da5b')
+  assert.equal(hit.session, 'da5b2a27-9e0f-4312-a473-79c37b9de966')
+  assert.equal(traceSrc(root, 'zzz'), null)
+  assert.equal(traceSrc(root, ''), null)
+})
+
+test('没给完整会话 id 时门牌本不写空账', () => {
+  const root = tmp()
+  appendMemory(root, 'pc', '没会话', new Date(), { src: 'abc12345', via: 'self' })
+  assert.deepEqual(readSrcIndex(root), {})
 })
 
 test('recall 能按触发方式过滤', () => {

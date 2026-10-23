@@ -59,7 +59,8 @@
 | `heart_write(text, kind?)` | 写入：`notebook`（本子）/ `memory`（记忆，自动带出处） |
 | `heart_revise(match, replacement)` | 改本子里的一条 |
 | `heart_discard(match)` | 弃用本子里的一条 |
-| `heart_recall(query, days?)` | 检索记忆 |
+| `heart_recall(query, days?, via?)` | 检索记忆；`via` 可只取 `chat` / `self` / `unknown` |
+| `heart_trace(src)` | 拿记忆行尾的 8 位门牌换回完整会话 id，并给出 sessions 目录位置 |
 | `heart_body(organ)` | 读器官：`voice` / `senses` / `hands` |
 | `heart_stats()` | 规模与当前身体 |
 | `heart_sense()` | 读你的环境感知：当前是否在电脑前、系统空闲、前台、距上次说话 |
@@ -77,8 +78,9 @@
 - 22:52 [phone] 旧的一条 · src:unknown via:unknown
 ```
 
-- `src`：写这条记忆时所在会话 id 的**前 8 位**（去掉 `session-` 前缀），拿它去
-  `<DSH_HOME>/sessions/**/<uuid>/` 里 grep 就能找回原文。
+- `src`：写这条记忆时所在会话 id 的**前 8 位**（去掉 `session-` 前缀）。完整 id 记在
+  `heart/src-index.json`（8 位 → 完整 uuid），`heart_trace("da5b2a27")` 直接换回来；
+  或者拿它去 `<DSH_HOME>/sessions/**/` 里 grep。
 - `via`：这一回合是谁起的——`chat`（用户发的话）/ `self`（插件自己 followup 进来的空闲回合或分发消息）/
   `unknown`（认不出）。判据是会话里最后一条 user 消息的 `source.kind`，不猜。
 - **不反推**：拿不到会话 id 或认不出触发方式，一律 `unknown`；不用设备名、日期去凑。

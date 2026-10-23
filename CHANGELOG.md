@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.1] - 2026-10-23
+
+### Added
+- `heart/src-index.json`：8 位门牌 → 完整会话 uuid（含出现次数、首次/最近时间，上限 500 条，超出按最近时间淘汰）。
+- `heart_trace(src)`：拿行尾门牌换回完整会话 id，并给出 `sessions/*/<uuid>/` 位置；查不到就说查不到。
+- store 单测 29/29。
+
 ## [0.15.0] - 2026-10-23
 
 按她的需求文档（`heart-provenance/README.md`）定稿出处格式：
