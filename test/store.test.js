@@ -36,6 +36,8 @@ import {
   reviseFact,
   reviseNotebook,
   safeDevice,
+  shortSessionId,
+  viaOfTurnMessages,
   SCHEMA_VERSION,
   stats,
 } from '../lib/store.js'
@@ -101,18 +103,29 @@ test('记忆按 日期.设备 分文件', () => {
   const b = appendMemory(root, 'phone', '第二条')
   assert.notEqual(a.file, b.file)
   assert.ok(a.file.endsWith(`${dateOf()}.pc.md`))
-  assert.match(a.line, /^- \d{2}:\d{2} \[pc\] 第一条 · src=unknown$/)
+  assert.match(a.line, /^- \d{2}:\d{2} \[pc\] 第一条 · src:unknown via:unknown$/)
 })
 
-test('记忆带上出处：有会话就记会话，没有就 unknown', () => {
+test('门槛：会话 id 取前 8 位，触发方式分开记', () => {
   const root = tmp()
-  const withSrc = appendMemory(root, 'pc', '有出处的一条', new Date(), 'session-abc123')
-  assert.match(withSrc.line, / · src=session-abc123$/)
-  const noSrc = appendMemory(root, 'pc', '没出处的一条')
-  assert.match(noSrc.line, / · src=unknown$/)
-  // 脏值不许进记忆，也不许拿它当出处
-  const dirty = appendMemory(root, 'pc', '脏出处', new Date(), 'session abc\n第二行')
-  assert.match(dirty.line, / · src=unknown$/)
+  const src = shortSessionId('session-da5b2a27-9e0f-4312-a473-79c37b9de966')
+  assert.equal(src, 'da5b2a27')
+  assert.equal(shortSessionId(''), 'unknown')
+  assert.equal(shortSessionId('!!!'), 'unknown')
+
+  const out = appendMemory(root, 'pc', '有门槛的一条', new Date(), { src, via: 'chat' })
+  assert.match(out.line, / · src:da5b2a27 via:chat$/)
+
+  const self = appendMemory(root, 'pc', '空闲时写的', new Date(), { src: 'abc12345', via: 'self' })
+  assert.match(self.line, / · src:abc12345 via:self$/)
+})
+
+test('脏出处/脏触发方式一律降级成 unknown', () => {
+  const root = tmp()
+  const dirty = appendMemory(root, 'pc', '脏出处', new Date(), { src: 'abc def\n第二行', via: 'whatever' })
+  assert.match(dirty.line, / · src:unknown via:unknown$/)
+  const bare = appendMemory(root, 'pc', '只给出处', new Date(), 'abc12345')
+  assert.match(bare.line, / · src:abc12345 via:unknown$/)
 })
 
 test('旧记忆补 unknown：只加标记，不改正文，幂等', () => {
@@ -124,8 +137,8 @@ test('旧记忆补 unknown：只加标记，不改正文，幂等', () => {
   const first = migrateProvenance(root)
   assert.equal(first.lines, 2)
   const body = fs.readFileSync(file, 'utf8')
-  assert.match(body, /^- 22:09 \[pc\] 老的一条 · src=unknown$/m)
-  assert.match(body, /^- 22:10 \[pc\] 老的两条 · src=unknown$/m)
+  assert.match(body, /^- 22:09 \[pc\] 老的一条 · src:unknown via:unknown$/m)
+  assert.match(body, /^- 22:10 \[pc\] 老的两条 · src:unknown via:unknown$/m)
 
   const second = migrateProvenance(root)
   assert.equal(second.lines, 0, '第二次不该再动')
@@ -134,9 +147,39 @@ test('旧记忆补 unknown：只加标记，不改正文，幂等', () => {
 
 test('迁移不会把已有出处覆盖成 unknown', () => {
   const root = tmp()
-  appendMemory(root, 'pc', '有出处', new Date(), 'session-keepme')
+  appendMemory(root, 'pc', '有出处', new Date(), { src: 'keepme12', via: 'chat' })
   migrateProvenance(root)
-  assert.match(fs.readFileSync(appendMemory(root, 'pc', '再写一条').file, 'utf8'), /session-keepme/)
+  const body = fs.readFileSync(appendMemory(root, 'pc', '再写一条').file, 'utf8')
+  assert.match(body, /src:keepme12 via:chat/)
+})
+
+test('触发方式看最后一条 user 消息的 source.kind', () => {
+  assert.equal(viaOfTurnMessages([]), 'unknown')
+  assert.equal(viaOfTurnMessages(undefined), 'unknown')
+  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'user' } }]), 'chat')
+  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'schedule' } }]), 'self')
+  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'plugin' } }]), 'self')
+  assert.equal(viaOfTurnMessages([{ role: 'user', source: { kind: 'system' } }]), 'unknown')
+  // 只看最后一条 user 消息，中间的 assistant/tool 不算
+  assert.equal(
+    viaOfTurnMessages([
+      { role: 'user', source: { kind: 'schedule' } },
+      { role: 'assistant', content: [] },
+      { role: 'user', source: { kind: 'user' } },
+    ]),
+    'chat',
+  )
+})
+
+test('recall 能按触发方式过滤', () => {
+  const root = tmp()
+  appendMemory(root, 'pc', '他说要早点睡', new Date(), { src: 'aaaa1111', via: 'chat' })
+  appendMemory(root, 'pc', '我自己想到要早点睡', new Date(), { src: 'bbbb2222', via: 'self' })
+  assert.equal(recall(root, '早点睡').count, 2)
+  assert.equal(recall(root, '早点睡', { via: 'chat' }).count, 1)
+  assert.match(recall(root, '早点睡', { via: 'chat' }).text, /他说要早点睡/)
+  assert.equal(recall(root, '早点睡', { via: 'self' }).count, 1)
+  assert.equal(recall(root, '早点睡', { via: 'unknown' }).count, 0)
 })
 
 test('检索命中关键词，不命中返回 0', () => {

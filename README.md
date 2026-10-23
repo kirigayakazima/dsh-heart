@@ -67,19 +67,35 @@
 | `heart_next(minutes, category?)` | 安排下一次空闲回合（6–180 分钟），并记一次类别；额度用完会拒绝 |
 | `heart_export(path?)` / `heart_import(path)` | 打包与合并恢复 |
 
-## 记忆的出处
+## 记忆的出处（provenance）
 
-记忆行的形状：
+记忆行在原有格式后面加两段门牌：
 
 ```
-- 22:09 [agent] 说了什么 · src=session-da5b2a27-9e0f-4312-a473-79c37b9de966
-- 22:52 [agent] 旧的一条 · src=unknown
+- 22:09 [phone] 说了什么 · src:da5b2a27 via:chat
+- 00:42 [phone] 空闲时自己想到的 · src:bb4c19e0 via:self
+- 22:52 [phone] 旧的一条 · src:unknown via:unknown
 ```
 
-- `src` 是写这条记忆时所在的会话 id，能顺着会话日志追到原文。
-- 子代理写的记忆记的是它自己的会话，不会冒充主会话。
-- **不反推**：来源不明的就是 `unknown`。拿不到会话 id 时也写 `unknown`，不拿设备名或日期凑。
-- 老记忆由 `migrate()` 在启动时补标记，幂等；正文一个字不动。
+- `src`：写这条记忆时所在会话 id 的**前 8 位**（去掉 `session-` 前缀），拿它去
+  `<DSH_HOME>/sessions/**/<uuid>/` 里 grep 就能找回原文。
+- `via`：这一回合是谁起的——`chat`（用户发的话）/ `self`（插件自己 followup 进来的空闲回合或分发消息）/
+  `unknown`（认不出）。判据是会话里最后一条 user 消息的 `source.kind`，不猜。
+- **不反推**：拿不到会话 id 或认不出触发方式，一律 `unknown`；不用设备名、日期去凑。
+- 老记忆由 `migrate()` 在启动时补 `· src:unknown via:unknown`：幂等、只加标记、正文一个字不动。
+- 脏值（带空格、换行等）在 `normalizeSrc()` 降级成 `unknown`，不让一行记忆被写坏。
+
+检索时可以只取一类：
+
+```text
+heart_recall(query="早点睡", via="chat")   # 他说过的
+heart_recall(query="早点睡", via="self")   # 我自己想到的
+heart_recall(query="早点睡", via="any")    # 默认
+```
+
+两条来源的可信度不一样，这个过滤器就是给这个用的。
+
+> 代价：每条记忆多约 25 字节。`readSelf` 有 8 KB 注入上限，30 天记忆累起来会提前一点截断。
 
 ## 心在上下文
 

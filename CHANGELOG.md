@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.0] - 2026-10-23
+
+按她的需求文档（`heart-provenance/README.md`）定稿出处格式：
+
+### Changed
+- 行尾改成 `· src:<会话 id 前 8 位> via:<chat|self|unknown>`（0.14.0 的 `src=<完整 id>` 作废，未发布给任何设备）。
+- `via` 判断这一回合是谁起的：最后一条 user 消息 `source.kind` 为 `user` → `chat`，`schedule`/`plugin` → `self`。
+- `heart_recall` 新增 `via` 过滤：`any` / `chat` / `self` / `unknown`。
+
+### Added
+- `migrate()` 启动时给旧记忆补 `· src:unknown via:unknown`（幂等、只加标记、不反推）。
+- `shortSessionId()` / `normalizeSrc()` / `normalizeVia()` / `viaOfTurnMessages()`，都有单测。
+- store 单测 27/27。
+
 ## [0.14.0] - 2026-10-23
 
 ### Added
