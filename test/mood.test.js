@@ -1,0 +1,450 @@
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
+import {
+  readMood,
+  readPersistedMood,
+  updateMood,
+  resetMood,
+  getEffectiveMood,
+  calculateDecayedIntensity,
+  validateMoodCandidate,
+  shouldUpdateMood,
+  createDefaultMood,
+  formatMoodPrompt,
+  MOOD_STATES,
+  MOOD_REASONS,
+  STATE_REASON_MATRIX,
+  LOW_INTENSITY_THRESHOLD,
+  DEFAULT_HALF_LIFE_MS,
+  MOOD_FILE,
+  acquireDirLock,
+  releaseDirLock,
+} from '../lib/store.js'
+import { buildMoodSection } from '../lib/prompt.js'
+
+const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'heart-mood-test-'))
+
+// ---------------------------------------------------------------- 1. 纯数学与指数衰减纯函数
+test('1. calculateDecayedIntensity 纯数学衰减精度与边界验证', () => {
+  const H = 2 * 3600 * 1000 // 2小时
+
+  // 0 时间衰减：强度不变
+  assert.equal(calculateDecayedIntensity(0.8, 0, H), 0.8)
+
+  // 1 个半衰期：折半 (0.8 -> 0.4)
+  const i1 = calculateDecayedIntensity(0.8, H, H)
+  assert.ok(Math.abs(i1 - 0.4) < 1e-6)
+
+  // 2 个半衰期：折半再折半 (0.8 -> 0.2)
+  const i2 = calculateDecayedIntensity(0.8, 2 * H, H)
+  assert.ok(Math.abs(i2 - 0.2) < 1e-6)
+
+  // 时间倒退（负时间差）：时钟倒退防御，强制按 0 处理，绝不放大强度
+  const iNegative = calculateDecayedIntensity(0.8, -3600 * 1000, H)
+  assert.equal(iNegative, 0.8)
+
+  // 非法或边界输入
+  assert.equal(calculateDecayedIntensity(0, 1000, H), 0)
+  assert.equal(calculateDecayedIntensity(-0.5, 1000, H), 0)
+  assert.equal(calculateDecayedIntensity(NaN, 1000, H), 0)
+})
+
+test('2. getEffectiveMood 惰性有效状态计算与阈值回归 calm', () => {
+  const t0 = new Date('2026-10-26T10:00:00.000Z')
+  const H = 2 * 3600 * 1000
+
+  const persisted = {
+    schemaVersion: 1,
+    state: 'cheerful',
+    intensity: 0.8,
+    updatedAt: t0.toISOString(),
+    reason: 'task_completed',
+  }
+
+  // 经过 2 小时：0.8 -> 0.4 (仍 > 0.15 阈值，保持 cheerful)
+  const t1 = new Date(t0.getTime() + H)
+  const eff1 = getEffectiveMood(persisted, t1, { halfLifeMs: H })
+  assert.equal(eff1.state, 'cheerful')
+  assert.equal(eff1.intensity, 0.4)
+
+  // 经过 4 小时：0.8 -> 0.2 (仍 > 0.15 阈值，保持 cheerful)
+  const t2 = new Date(t0.getTime() + 2 * H)
+  const eff2 = getEffectiveMood(persisted, t2, { halfLifeMs: H })
+  assert.equal(eff2.state, 'cheerful')
+  assert.equal(eff2.intensity, 0.2)
+
+  // 经过 5.5 小时：0.8 * 2^(-2.75) ≈ 0.119 <= 0.15 (自动回归 calm，强度归零)
+  const t3 = new Date(t0.getTime() + 5.5 * 3600 * 1000)
+  const eff3 = getEffectiveMood(persisted, t3, { halfLifeMs: H })
+  assert.equal(eff3.state, 'calm')
+  assert.equal(eff3.intensity, 0.0)
+
+  // calm 状态无论原始强度是多少，规范化后强度均必须为 0.0
+  const calmPersisted = {
+    schemaVersion: 1,
+    state: 'calm',
+    intensity: 0.5, // 语义冲突脏数据
+    updatedAt: t0.toISOString(),
+    reason: 'baseline',
+  }
+  const effCalm = getEffectiveMood(calmPersisted, t0)
+  assert.equal(effCalm.state, 'calm')
+  assert.equal(effCalm.intensity, 0.0)
+})
+
+// ---------------------------------------------------------------- 2. 候选状态基础校验与状态转移约束
+test('3. validateMoodCandidate 校验合法性与非法拦截', () => {
+  // 合法用例
+  assert.equal(validateMoodCandidate({ state: 'calm', intensity: 0, reason: 'baseline' }).ok, true)
+  assert.equal(validateMoodCandidate({ state: 'engaged', intensity: 0.6, reason: 'focus' }).ok, true)
+  assert.equal(validateMoodCandidate({ state: 'cheerful', intensity: 0.8, reason: 'task_completed' }).ok, true)
+
+  // 非法状态
+  assert.equal(validateMoodCandidate({ state: 'angry', intensity: 0.5, reason: 'focus' }).reason, 'invalid-state')
+  assert.equal(validateMoodCandidate({ state: 'sad', intensity: 0.5, reason: 'focus' }).reason, 'invalid-state')
+
+  // 非法强度
+  assert.equal(validateMoodCandidate({ state: 'calm', intensity: -0.1, reason: 'baseline' }).reason, 'invalid-intensity')
+  assert.equal(validateMoodCandidate({ state: 'calm', intensity: 1.5, reason: 'baseline' }).reason, 'invalid-intensity')
+  assert.equal(validateMoodCandidate({ state: 'calm', intensity: NaN, reason: 'baseline' }).reason, 'invalid-intensity')
+  assert.equal(validateMoodCandidate({ state: 'calm', intensity: 'high', reason: 'baseline' }).reason, 'invalid-intensity')
+
+  // 非法原因
+  assert.equal(validateMoodCandidate({ state: 'calm', intensity: 0, reason: 'arbitrary_guess' }).reason, 'invalid-reason')
+})
+
+test('4. shouldUpdateMood 状态转移规则与 Reason 映射矩阵约束', () => {
+  const current = createDefaultMood()
+
+  // 1. baseline 严禁作为触发 excited/cheerful 的通行证（仅限 calm）
+  const rBaselineExcited = shouldUpdateMood(current, { state: 'excited', intensity: 0.8, reason: 'baseline' })
+  assert.equal(rBaselineExcited.ok, false)
+  assert.equal(rBaselineExcited.reason, 'state-reason-mismatch')
+
+  // 2. focus 仅允许触发 engaged，不能触发 cheerful
+  const rFocusCheerful = shouldUpdateMood(current, { state: 'cheerful', intensity: 0.7, reason: 'focus' })
+  assert.equal(rFocusCheerful.ok, false)
+  assert.equal(rFocusCheerful.reason, 'state-reason-mismatch')
+
+  // 3. task_completed 允许触发 excited，但有细分约束（强度 >= 0.7）
+  const rTaskLowExcited = shouldUpdateMood(current, { state: 'excited', intensity: 0.5, reason: 'task_completed' })
+  assert.equal(rTaskLowExcited.ok, false)
+  assert.equal(rTaskLowExcited.reason, 'intensity-too-low-for-state')
+
+  // 4. deep_work 仅用于持续高负荷工作后的低活跃过渡，且只允许 tired/calm（强度 0.2 ~ 0.6）
+  const rDeepWorkValid = shouldUpdateMood(current, { state: 'tired', intensity: 0.5, reason: 'deep_work' })
+  assert.equal(rDeepWorkValid.ok, true)
+  const rDeepWorkInvalidState = shouldUpdateMood(current, { state: 'cheerful', intensity: 0.5, reason: 'deep_work' })
+  assert.equal(rDeepWorkInvalidState.ok, false)
+  assert.equal(rDeepWorkInvalidState.reason, 'state-reason-mismatch')
+
+  // 5. 微小强度变化抑制（与当前【有效状态】对比）
+  const activeEffective = {
+    schemaVersion: 1,
+    state: 'engaged',
+    intensity: 0.60,
+    updatedAt: new Date().toISOString(),
+    reason: 'focus',
+  }
+  // 相同状态、相同原因，强度从 0.60 变成 0.62 (|ΔI| = 0.02 < 0.05)：无显著新事件，拦截写盘
+  const rMicro = shouldUpdateMood(activeEffective, { state: 'engaged', intensity: 0.62, reason: 'focus' })
+  assert.equal(rMicro.ok, false)
+  assert.equal(rMicro.reason, 'no-significant-change')
+
+  // 显著变化 (0.60 -> 0.75, |ΔI| = 0.15 >= 0.05)：允许写盘
+  const rSignificant = shouldUpdateMood(activeEffective, { state: 'engaged', intensity: 0.75, reason: 'focus' })
+  assert.equal(rSignificant.ok, true)
+})
+
+test('5. 微小强度变化抑制必须对比【衰减后当前有效状态】而非磁盘历史存储值', () => {
+  // 假设磁盘历史上在 6 小时前写入了 intensity: 0.8 的 task_completed
+  // 经过 6 小时衰减后，当前有效状态实际已衰减到 0.10 (回归 calm: 0.0)
+  const decayedEffective = {
+    schemaVersion: 1,
+    state: 'calm',
+    intensity: 0.0,
+    updatedAt: new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
+    reason: 'task_completed',
+  }
+
+  // 此时发生新事件，提交 intensity: 0.75 的 task_completed
+  // 虽然与磁盘历史值 0.8 很接近（0.8 - 0.75 = 0.05），但与当前【有效状态】0.0 相比是重大新事件！
+  const decision = shouldUpdateMood(decayedEffective, {
+    state: 'cheerful',
+    intensity: 0.75,
+    reason: 'task_completed',
+  })
+  // 必须判定允许更新，绝不能被错误抑制！
+  assert.equal(decision.ok, true)
+})
+
+// ---------------------------------------------------------------- 3. 持久化与存储容错
+test('6. readMood 文件不存在时返回默认基准 calm，不抛异常', () => {
+  const root = tmp()
+  const m = readMood(root)
+  assert.equal(m.state, 'calm')
+  assert.equal(m.intensity, 0.0)
+  assert.equal(m.reason, 'baseline')
+  assert.equal(m.schemaVersion, 1)
+})
+
+test('7. updateMood 正常更新、落盘并能读回，resetMood 重置为基准', () => {
+  const root = tmp()
+
+  const t0 = new Date('2026-10-26T12:00:00.000Z')
+  const res = updateMood(
+    root,
+    { state: 'cheerful', intensity: 0.7, reason: 'task_completed' },
+    t0
+  )
+  assert.equal(res.ok, true)
+  assert.equal(res.mood.state, 'cheerful')
+  assert.equal(res.mood.intensity, 0.7)
+  assert.equal(res.mood.reason, 'task_completed')
+
+  // 磁盘文件已存在且为合法 JSON
+  const persisted = readPersistedMood(root)
+  assert.equal(persisted.state, 'cheerful')
+  assert.equal(persisted.intensity, 0.7)
+
+  // 立即读取有效状态
+  const eff = readMood(root, t0)
+  assert.equal(eff.state, 'cheerful')
+  assert.equal(eff.intensity, 0.7)
+
+  // 重置
+  const rReset = resetMood(root, new Date('2026-10-26T12:05:00.000Z'))
+  assert.equal(rReset.ok, true)
+  assert.equal(rReset.mood.state, 'calm')
+  assert.equal(rReset.mood.intensity, 0.0)
+
+  // 读回确认已恢复 baseline
+  const afterReset = readMood(root)
+  assert.equal(afterReset.state, 'calm')
+  assert.equal(afterReset.intensity, 0.0)
+})
+
+test('8. 损坏 JSON 与非法 Schema：只读安全回退，绝不覆盖破坏磁盘现场', () => {
+  const root = tmp()
+  const bodyDir = path.join(root, 'body')
+  fs.mkdirSync(bodyDir, { recursive: true })
+  const file = path.join(bodyDir, MOOD_FILE)
+
+  // 构造损坏 JSON 内容
+  const corruptContent = '{ "schemaVersion": 1, "state": "cheerful", "intensity": MALFORMED...'
+  fs.writeFileSync(file, corruptContent, 'utf8')
+
+  // 调用 readMood，必须安全回退至默认 calm，绝不抛出异常
+  const m = readMood(root)
+  assert.equal(m.state, 'calm')
+  assert.equal(m.intensity, 0.0)
+
+  // 核心断言：磁盘上的损坏现场必须原封不动完好保留，绝不能在读操作中被自动覆写
+  const rawAfterRead = fs.readFileSync(file, 'utf8')
+  assert.equal(rawAfterRead, corruptContent)
+})
+
+test('9. 锁超时保护：外部占用锁目录时，updateMood 与 resetMood 均返回明确失败，原数据不被损坏', () => {
+  const root = tmp()
+  // 先写入一条有效记录
+  updateMood(root, { state: 'engaged', intensity: 0.6, reason: 'focus' })
+  const original = readPersistedMood(root)
+  assert.equal(original.state, 'engaged')
+
+  // 外部占用锁目录
+  const bodyDir = path.join(root, 'body')
+  const lockDir = path.join(bodyDir, `${MOOD_FILE}.lock`)
+  const lockToken = acquireDirLock(lockDir)
+  assert.ok(lockToken)
+
+  try {
+    // 调用 updateMood，必须明确返回 lock-timeout 业务失败，绝不伪报成功
+    const resUpdate = updateMood(root, { state: 'cheerful', intensity: 0.8, reason: 'task_completed' })
+    assert.equal(resUpdate.ok, false)
+    assert.equal(resUpdate.reason, 'lock-timeout')
+
+    // 调用 resetMood，同样必须明确返回 lock-timeout 失败
+    const resReset = resetMood(root)
+    assert.equal(resReset.ok, false)
+    assert.equal(resReset.reason, 'lock-timeout')
+  } finally {
+    releaseDirLock(lockDir, lockToken)
+  }
+
+  // 核心断言：原文件数据完好无损，未发生任何覆写或破损
+  const after = readPersistedMood(root)
+  assert.equal(after.state, 'engaged')
+  assert.equal(after.intensity, 0.6)
+})
+
+// ---------------------------------------------------------------- 4. 并发互斥与多进程测试
+test('10. resetMood 与 updateMood 跨进程并发互斥：串行化写入，无损坏 JSON', async () => {
+  const root = tmp()
+  updateMood(root, { state: 'calm', intensity: 0.0, reason: 'baseline' })
+
+  const storeModuleUrl = pathToFileURL(path.resolve(import.meta.dirname, '../lib/store.js')).href
+
+  const runSubprocess = (mode) => {
+    return new Promise((resolve, reject) => {
+      const script = `
+        import('${storeModuleUrl}').then((m) => {
+          if (process.argv[2] === 'update') {
+            m.updateMood(process.argv[1], { state: 'cheerful', intensity: 0.75, reason: 'task_completed' });
+          } else {
+            m.resetMood(process.argv[1]);
+          }
+          process.exit(0);
+        }).catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+      `
+      const child = spawn(process.execPath, [
+        '--input-type=module',
+        '-e',
+        script,
+        root,
+        mode,
+      ])
+      let stderr = ''
+      child.stderr.on('data', (d) => { stderr += d })
+      child.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(`Subprocess exited with code ${code}: ${stderr}`))
+      })
+    })
+  }
+
+  // 并发拉起两进程：一个执行 updateMood，另一个执行 resetMood
+  await Promise.all([runSubprocess('update'), runSubprocess('reset')])
+
+  // 核心断言：最终落盘的文件必须是合法的 JSON 格式，且 state 只能是 cheerful 或 calm 之一，绝无混叠破损
+  const persisted = readPersistedMood(root)
+  assert.ok(persisted !== null)
+  assert.ok(['cheerful', 'calm'].includes(persisted.state))
+  assert.equal(persisted.schemaVersion, 1)
+})
+
+// ---------------------------------------------------------------- 5. 提示词隔离与低侵入表现
+test('11. formatMoodPrompt 提示词纯净隔离：无自由文本 reason，无模型思考过程', () => {
+  // 1. calm 或低强度 (<= 0.15) 时，返回空字符串（零侵入、零 token 消耗）
+  assert.equal(formatMoodPrompt({ state: 'calm', intensity: 0 }), '')
+  assert.equal(formatMoodPrompt({ state: 'cheerful', intensity: 0.12 }), '')
+  assert.equal(formatMoodPrompt(null), '')
+
+  // 2. 活跃状态 (intensity > 0.15) 映射为预定义文案
+  const promptCheerful = formatMoodPrompt({ state: 'cheerful', intensity: 0.6, reason: 'task_completed' })
+  assert.ok(promptCheerful.includes('### 当前表达状态'))
+  assert.ok(promptCheerful.includes('当前倾向：轻快、愉悦。'))
+  assert.ok(promptCheerful.includes('表达建议：可以适度活泼、亲切，但保持自然。'))
+  assert.ok(promptCheerful.includes('该状态是短期表达参考，不是固定人格规则。'))
+
+  // 核心安全隔离断言：绝对不能将内部 reason 字符串或任何未经验证的自由文本塞入系统提示词
+  assert.equal(promptCheerful.includes('task_completed'), false)
+  assert.equal(promptCheerful.includes('0.6'), false)
+
+  // 3. 验证 tired 包含舒缓建议且不作为拒单理由声明
+  const promptTired = formatMoodPrompt({ state: 'tired', intensity: 0.45, reason: 'deep_work' })
+  assert.ok(promptTired.includes('当前倾向：低活跃、舒缓。'))
+  assert.ok(promptTired.includes('不作为拒绝任务的理由'))
+  assert.equal(promptTired.includes('deep_work'), false)
+})
+
+test('12. buildMoodSection 集成与降级测试', () => {
+  const root = tmp()
+
+  // 1. 默认无文件时，返回空串（零侵入）
+  assert.equal(buildMoodSection(root), '')
+
+  // 2. 正常更新后，注入预定义段落
+  updateMood(root, { state: 'engaged', intensity: 0.65, reason: 'focus' })
+  const section = buildMoodSection(root)
+  assert.ok(section.includes('当前倾向：投入、专注。'))
+  assert.ok(section.includes('清晰、积极推进，保持专注节奏。'))
+
+  // 3. 损坏文件时，优雅降级返回空串，绝不抛出异常破坏上下文装配
+  const file = path.join(root, 'body', MOOD_FILE)
+  fs.writeFileSync(file, 'BROKEN_DATA', 'utf8')
+  assert.equal(buildMoodSection(root), '')
+})
+
+test('13. heart_mood 工具执行层处理成功、业务拒绝、锁超时与异常反馈', async () => {
+  const root = tmp()
+
+  const executeMoodTool = async (args) => {
+    try {
+      const rawIntensity = args && args.intensity
+      const numIntensity = typeof rawIntensity === 'number' ? rawIntensity : Number(rawIntensity)
+      const res = updateMood(root, {
+        state: args && args.state,
+        intensity: numIntensity,
+        reason: args && args.reason,
+      })
+      if (!res.ok) {
+        return { message: `未更新状态：${res.message || res.reason}` }
+      }
+      const m = res.mood
+      return { message: `已更新当前表达状态：${m.state}（强度 ${m.intensity}，原因：${m.reason}）` }
+    } catch (err) {
+      return { message: `更新状态失败：${err.message || String(err)}` }
+    }
+  }
+
+  // 1. 成功更新
+  const msgOk = await executeMoodTool({ state: 'cheerful', intensity: 0.7, reason: 'task_completed' })
+  assert.ok(msgOk.message.includes('已更新当前表达状态：cheerful（强度 0.7，原因：task_completed）'))
+
+  // 2. 状态与原因不匹配业务拒绝
+  const msgMismatch = await executeMoodTool({ state: 'excited', intensity: 0.4, reason: 'task_completed' })
+  assert.ok(msgMismatch.message.includes('未更新状态：状态 "excited" 在原因 "task_completed" 下要求强度至少为 0.7'))
+
+  // 3. 无显著新事件拦截
+  const msgNoChange = await executeMoodTool({ state: 'cheerful', intensity: 0.72, reason: 'task_completed' })
+  assert.ok(msgNoChange.message.includes('未更新状态：与当前有效状态相比无显著新事件变化'))
+
+  // 4. 锁超时
+  const lockDir = path.join(root, 'body', `${MOOD_FILE}.lock`)
+  const token = acquireDirLock(lockDir)
+  assert.ok(token)
+  try {
+    const msgLock = await executeMoodTool({ state: 'engaged', intensity: 0.8, reason: 'focus' })
+    assert.ok(msgLock.message.includes('未更新状态：获取文件锁超时'))
+  } finally {
+    releaseDirLock(lockDir, token)
+  }
+
+  // 5. 存储异常（写入只读或无效路径）
+  const fakeRoot = path.join(tmp(), 'not-a-dir-file')
+  fs.writeFileSync(fakeRoot, 'dummy')
+  const executeWithFakeRoot = async () => {
+    try {
+      updateMood(fakeRoot, { state: 'calm', intensity: 0, reason: 'baseline' })
+      return { message: 'ok' }
+    } catch (err) {
+      return { message: `更新状态失败：${err.message}` }
+    }
+  }
+  const msgErr = await executeWithFakeRoot()
+  assert.ok(msgErr.message.includes('更新状态失败：'))
+})
+
+test('14. 低自主性架构断言：零后台定时器、零主动活动、零长期记忆写入', () => {
+  const moodCode = fs.readFileSync(path.resolve(import.meta.dirname, '../lib/mood.js'), 'utf8')
+  // 静态断言：不得包含 setInterval、setTimeout 或轮询写盘逻辑
+  assert.equal(moodCode.includes('setInterval'), false)
+  assert.equal(moodCode.includes('setTimeout'), false)
+
+  // 静态断言：不得向 notebook.md、facts.md 或 MEMORY 写入长期记忆
+  assert.equal(moodCode.includes('appendNotebook'), false)
+  assert.equal(moodCode.includes('appendFact'), false)
+  assert.equal(moodCode.includes('appendMemory'), false)
+
+  // 静态断言：不得触发主动开口或通知
+  assert.equal(moodCode.includes('enqueueSay'), false)
+  assert.equal(moodCode.includes('followup'), false)
+})
