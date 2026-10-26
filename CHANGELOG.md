@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.15.3] - 2026-10-26
+
+### Added
+- **表达习惯进化（Voice Evolution）**：
+  - 新增 `body/voice-learned.md`，支持通过 `heart_voice_learn` 记录从相处中学习到的表达习惯；
+  - 自动去重与上限淘汰（最多 100 条），提示词安全注入（逆序最多 6 条、总计 800 字限制并做防指令注入净化）；
+  - `importBundle` 跨平台路径规范化与目录穿越防御，导入时支持去重合并与互斥锁保护。
+- **情绪感知状态机（Mood）**：
+  - 独立 `lib/mood.js` 模块，采用低自主性离散状态机（`calm`, `engaged`, `cheerful`, `excited`, `tired`）；
+  - `STATE_REASON_MATRIX` 状态原因映射矩阵约束，`deep_work` 严格收敛至仅 `tired`（0.2~0.6），严禁将疲劳作为拒绝任务的理由；
+  - 惰性指数衰减（读时纯内存计算，半衰期 2 小时，<= 0.15 阈值自动归零回归 calm），时钟倒退防御与有效状态微小变化抑制；
+  - 导出统一纯函数 `isValidPersistedMood`，严格校验持久化记录（强度 `[0.0, 1.0]`，合法时间戳）；损坏数据只读安全回退 calm，磁盘现场 100% 留存；
+  - 提示词预定义文案纯净隔离，`heart_mood` 工具注册。
+- **存储与测试**：
+  - 复用目录锁跨进程并发保护与僵尸锁自愈机制；
+  - 新增 47 项专项测试（Voice Learn 31 项 + Mood 16 项），全量 113/113 项自动化测试保持 100% 通过。
+
 ## [0.15.2] - 2026-10-23
 
 ### Fixed

@@ -272,7 +272,8 @@ test('maybeTrigger 触发开口、记录状态并防止重复触发', async () =
     },
   }
 
-  const nowMs = Date.now()
+  const testNow = new Date('2026-10-21T14:00:00.000Z')
+  const nowMs = testNow.getTime()
   const prev = {
     presence: 'away',
     at: new Date(nowMs - 50 * 1000).toISOString(),
@@ -286,7 +287,7 @@ test('maybeTrigger 触发开口、记录状态并防止重复触发', async () =
     pulseSeconds: 60,
   }
 
-  const ok = await maybeTrigger(ctx, root, prev, next, config)
+  const ok = await maybeTrigger(ctx, root, prev, next, config, testNow)
   assert.equal(ok, true)
   assert.ok(followedUp)
   assert.equal(followedUp.role, 'user')
@@ -298,7 +299,7 @@ test('maybeTrigger 触发开口、记录状态并防止重复触发', async () =
   assert.ok(triggerState.lastTriggerAt)
 
   // 冷却内再次调用 -> 不触发
-  const okAgain = await maybeTrigger(ctx, root, prev, next, config)
+  const okAgain = await maybeTrigger(ctx, root, prev, next, config, new Date(testNow.getTime() + 60000))
   assert.equal(okAgain, false)
 })
 
@@ -438,10 +439,11 @@ test('maybeTrigger：空闲时起一轮，记录配额，间隔内不再触发',
     idleTurnDailyCap: 3,
     idleTurnGapMinutes: 60,
   }
-  const prev = { presence: 'nearby', at: new Date(Date.now() - 60000).toISOString() }
+  const testNow = new Date('2026-10-21T14:00:00.000Z')
+  const prev = { presence: 'nearby', at: new Date(testNow.getTime() - 60000).toISOString() }
   const next = { presence: 'away', sinceMsgMin: 40 }
 
-  const ok = await maybeTrigger(ctx, root, prev, next, config)
+  const ok = await maybeTrigger(ctx, root, prev, next, config, testNow)
   assert.equal(ok, true)
   assert.ok(followedUp)
   assert.ok(followedUp.content[0].text.includes('你一个人'))
@@ -452,5 +454,5 @@ test('maybeTrigger：空闲时起一轮，记录配额，间隔内不再触发',
   assert.ok(state.lastIdleTurnAt)
 
   // 间隔内再次调用 -> 不触发
-  assert.equal(await maybeTrigger(ctx, root, prev, next, config), false)
+  assert.equal(await maybeTrigger(ctx, root, prev, next, config, new Date(testNow.getTime() + 60000)), false)
 })
