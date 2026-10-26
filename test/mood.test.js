@@ -11,6 +11,7 @@ import {
   updateMood,
   resetMood,
   getEffectiveMood,
+  isValidPersistedMood,
   calculateDecayedIntensity,
   validateMoodCandidate,
   shouldUpdateMood,
@@ -136,12 +137,16 @@ test('4. shouldUpdateMood 状态转移规则与 Reason 映射矩阵约束', () =
   assert.equal(rTaskLowExcited.ok, false)
   assert.equal(rTaskLowExcited.reason, 'intensity-too-low-for-state')
 
-  // 4. deep_work 仅用于持续高负荷工作后的低活跃过渡，且只允许 tired/calm（强度 0.2 ~ 0.6）
+  // 4. deep_work 仅用于持续高负荷工作后的低活跃过渡，且严格只允许 tired（强度 0.2 ~ 0.6）
   const rDeepWorkValid = shouldUpdateMood(current, { state: 'tired', intensity: 0.5, reason: 'deep_work' })
   assert.equal(rDeepWorkValid.ok, true)
   const rDeepWorkInvalidState = shouldUpdateMood(current, { state: 'cheerful', intensity: 0.5, reason: 'deep_work' })
   assert.equal(rDeepWorkInvalidState.ok, false)
   assert.equal(rDeepWorkInvalidState.reason, 'state-reason-mismatch')
+  // deep_work 不允许触发 calm（回归 calm 由时间自然衰减或显式 baseline 负责）
+  const rDeepWorkCalm = shouldUpdateMood(current, { state: 'calm', intensity: 0.0, reason: 'deep_work' })
+  assert.equal(rDeepWorkCalm.ok, false)
+  assert.equal(rDeepWorkCalm.reason, 'state-reason-mismatch')
 
   // 5. 微小强度变化抑制（与当前【有效状态】对比）
   const activeEffective = {
@@ -447,4 +452,137 @@ test('14. 低自主性架构断言：零后台定时器、零主动活动、零�
   // 静态断言：不得触发主动开口或通知
   assert.equal(moodCode.includes('enqueueSay'), false)
   assert.equal(moodCode.includes('followup'), false)
+})
+
+// ---------------------------------------------------------------- 6. 持久化记录严格校验与损坏现场保留
+test('15. isValidPersistedMood 纯函数边界验证（状态、强度、时间戳严格校验）', () => {
+  const validRecord = {
+    schemaVersion: 1,
+    state: 'cheerful',
+    intensity: 0.8,
+    reason: 'task_completed',
+    updatedAt: '2026-10-26T12:00:00.000Z',
+  }
+
+  // 合法记录
+  assert.equal(isValidPersistedMood(validRecord), true)
+  assert.equal(isValidPersistedMood({ ...validRecord, state: 'calm', intensity: 0.0, reason: 'baseline' }), true)
+  assert.equal(isValidPersistedMood({ ...validRecord, state: 'tired', intensity: 0.5, reason: 'deep_work' }), true)
+
+  // 非对象或数组
+  assert.equal(isValidPersistedMood(null), false)
+  assert.equal(isValidPersistedMood(undefined), false)
+  assert.equal(isValidPersistedMood('string'), false)
+  assert.equal(isValidPersistedMood(123), false)
+  assert.equal(isValidPersistedMood([validRecord]), false)
+
+  // schemaVersion 校验
+  assert.equal(isValidPersistedMood({ ...validRecord, schemaVersion: 2 }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, schemaVersion: 0 }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, schemaVersion: '1' }), false)
+
+  // state 枚举校验
+  assert.equal(isValidPersistedMood({ ...validRecord, state: 'angry' }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, state: '' }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, state: null }), false)
+
+  // intensity 区间 [0.0, 1.0] 与有限数值校验
+  assert.equal(isValidPersistedMood({ ...validRecord, intensity: -0.1 }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, intensity: 1.01 }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, intensity: 10.0 }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, intensity: NaN }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, intensity: Infinity }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, intensity: '0.8' }), false)
+
+  // reason 枚举校验
+  assert.equal(isValidPersistedMood({ ...validRecord, reason: 'unknown_reason' }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, reason: '' }), false)
+
+  // updatedAt 校验（非空字符串且合法可解析时间戳）
+  assert.equal(isValidPersistedMood({ ...validRecord, updatedAt: '' }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, updatedAt: '   ' }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, updatedAt: 'invalid-date' }), false)
+  assert.equal(isValidPersistedMood({ ...validRecord, updatedAt: 1729944000000 }), false)
+  const withoutUpdatedAt = { ...validRecord }
+  delete withoutUpdatedAt.updatedAt
+  assert.equal(isValidPersistedMood(withoutUpdatedAt), false)
+})
+
+test('16. 持久化记录超界强度或非法时间戳：readMood 与 getEffectiveMood 安全回退为 calm 且磁盘现场未被修改', () => {
+  // Case 1: intensity 超过 1.0 (例如 10.0)
+  const root1 = tmp()
+  const file1 = path.join(root1, 'body', MOOD_FILE)
+  fs.mkdirSync(path.dirname(file1), { recursive: true })
+  const raw1 = JSON.stringify({
+    schemaVersion: 1,
+    state: 'cheerful',
+    intensity: 10.0,
+    reason: 'task_completed',
+    updatedAt: new Date().toISOString(),
+  }, null, 2)
+  fs.writeFileSync(file1, raw1, 'utf8')
+
+  const eff1 = readMood(root1)
+  assert.equal(eff1.state, 'calm')
+  assert.equal(eff1.intensity, 0.0)
+  assert.equal(eff1.reason, 'baseline')
+  assert.equal(fs.readFileSync(file1, 'utf8'), raw1, '磁盘原文件绝不能被覆盖修改')
+
+  // Case 2: intensity 小于 0.0 (例如 -0.5)
+  const root2 = tmp()
+  const file2 = path.join(root2, 'body', MOOD_FILE)
+  fs.mkdirSync(path.dirname(file2), { recursive: true })
+  const raw2 = JSON.stringify({
+    schemaVersion: 1,
+    state: 'engaged',
+    intensity: -0.5,
+    reason: 'focus',
+    updatedAt: new Date().toISOString(),
+  }, null, 2)
+  fs.writeFileSync(file2, raw2, 'utf8')
+
+  const eff2 = readMood(root2)
+  assert.equal(eff2.state, 'calm')
+  assert.equal(eff2.intensity, 0.0)
+  assert.equal(fs.readFileSync(file2, 'utf8'), raw2, '磁盘原文件绝不能被覆盖修改')
+
+  // Case 3: 缺失 updatedAt
+  const root3 = tmp()
+  const file3 = path.join(root3, 'body', MOOD_FILE)
+  fs.mkdirSync(path.dirname(file3), { recursive: true })
+  const raw3 = JSON.stringify({
+    schemaVersion: 1,
+    state: 'cheerful',
+    intensity: 0.8,
+    reason: 'task_completed',
+  }, null, 2)
+  fs.writeFileSync(file3, raw3, 'utf8')
+
+  const eff3 = readMood(root3)
+  assert.equal(eff3.state, 'calm')
+  assert.equal(eff3.intensity, 0.0)
+  assert.equal(fs.readFileSync(file3, 'utf8'), raw3, '磁盘原文件绝不能被覆盖修改')
+
+  // Case 4: 非法时间戳字符串 (如 'not-a-valid-date')
+  const root4 = tmp()
+  const file4 = path.join(root4, 'body', MOOD_FILE)
+  fs.mkdirSync(path.dirname(file4), { recursive: true })
+  const raw4 = JSON.stringify({
+    schemaVersion: 1,
+    state: 'excited',
+    intensity: 0.85,
+    reason: 'task_completed',
+    updatedAt: 'not-a-valid-date',
+  }, null, 2)
+  fs.writeFileSync(file4, raw4, 'utf8')
+
+  const eff4 = readMood(root4)
+  assert.equal(eff4.state, 'calm')
+  assert.equal(eff4.intensity, 0.0)
+  assert.equal(fs.readFileSync(file4, 'utf8'), raw4, '磁盘原文件绝不能被覆盖修改')
+
+  // 直接调用 getEffectiveMood 纯函数验证
+  assert.equal(getEffectiveMood({ schemaVersion: 1, state: 'cheerful', intensity: 10.0, reason: 'task_completed', updatedAt: '2026-10-26T12:00:00.000Z' }).state, 'calm')
+  assert.equal(getEffectiveMood({ schemaVersion: 1, state: 'cheerful', intensity: 0.8, reason: 'task_completed', updatedAt: 'not-a-date' }).state, 'calm')
+  assert.equal(getEffectiveMood({ schemaVersion: 1, state: 'cheerful', intensity: 0.8, reason: 'task_completed' }).state, 'calm')
 })
