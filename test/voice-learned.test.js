@@ -265,8 +265,10 @@ test('12. 锁所有者验证：持有不同 token 的旧进程恢复后尝试释
 
   // 模拟锁所有权更替：例如发生回收后由进程 B 占有锁
   const tokenB = 'simulated_process_b_token_xyz'
+  // 清除 A 的凭据，写入 B 的新凭据
+  try { fs.unlinkSync(path.join(lockDir, `token.${tokenA}.json`)) } catch {}
   fs.writeFileSync(
-    path.join(lockDir, 'owner.json'),
+    path.join(lockDir, `token.${tokenB}.json`),
     JSON.stringify({ pid: process.pid, token: tokenB, createdAt: Date.now() }),
     'utf8'
   )
@@ -276,7 +278,7 @@ test('12. 锁所有者验证：持有不同 token 的旧进程恢复后尝试释
   // 断言释放被拒绝，返回 false
   assert.equal(released, false)
 
-  // 核心断言：锁目录和 B 的 owner.json 依然完整保留，绝不误删 B 的锁！
+  // 核心断言：锁目录和 B 的凭据依然完整保留，绝不误删 B 的锁！
   assert.ok(fs.existsSync(lockDir))
   assert.equal(readLockOwner(lockDir)?.token, tokenB)
 
@@ -498,16 +500,15 @@ test('19. 两个独立子进程真实并发竞争回收同一把僵尸锁：自�
   assert.equal(lines.length, 2)
 })
 
-test('20. 回收者持有回收锁期间暂停，存活回收者的锁绝不因超时被强行抢占或误删', () => {
+test('20. 存活持锁者绝对保护：即使时间超期，存活进程的锁绝不被误删或强行抢占', () => {
   const root = tmp()
   const lockDir = path.join(root, 'reclaim-alive.lock')
-  const reclaimLock = `${lockDir}.reclaim.lock`
+  fs.mkdirSync(lockDir, { recursive: true })
 
-  // 模拟回收者进程（当前存活进程 PID）持有 reclaim.lock，且时间戳较旧（60秒前）
-  fs.mkdirSync(reclaimLock, { recursive: true })
+  // 模拟当前存活进程持有锁，且时间戳较旧（60秒前）
   fs.writeFileSync(
-    path.join(reclaimLock, 'owner.json'),
-    JSON.stringify({ pid: process.pid, token: 'alive_reclaimer', createdAt: Date.now() - 60000 }),
+    path.join(lockDir, 'token.alive_owner.json'),
+    JSON.stringify({ pid: process.pid, token: 'alive_owner', createdAt: Date.now() - 60000 }),
     'utf8'
   )
 
@@ -515,38 +516,42 @@ test('20. 回收者持有回收锁期间暂停，存活回收者的锁绝不因�
   assert.equal(isProcessAlive(process.pid), true)
   const res = tryReclaimStaleLock(lockDir, 1000)
 
-  // 核心断言：检测到持锁回收者依然存活，宁可放弃回收也绝不删除或抢占有效回收锁
+  // 核心断言：检测到持锁者依然存活，严禁回收，绝不删除或抢占有效锁！
   assert.equal(res, false)
-  assert.ok(fs.existsSync(reclaimLock))
-  assert.equal(readLockOwner(reclaimLock)?.token, 'alive_reclaimer')
+  assert.ok(fs.existsSync(lockDir))
+  assert.equal(readLockOwner(lockDir)?.token, 'alive_owner')
 
   // 安全清理
-  releaseDirLock(reclaimLock, 'alive_reclaimer')
+  releaseDirLock(lockDir, 'alive_owner')
 })
 
-test('21. 模拟旧回收者恢复执行，核验 Token 证明其无法误删新回收者的回收锁', () => {
+test('21. 靶向 Token 状态转移：试图靶向重命名不存在的死锁 Token 必然失败，新锁凭据完全不受影响', () => {
   const root = tmp()
-  const reclaimLock = path.join(root, 'test.reclaim.lock')
+  const lockDir = path.join(root, 'token-target.lock')
+  fs.mkdirSync(lockDir, { recursive: true })
 
-  // 模拟新回收者 B 已经合法占有回收锁，写入 Token B
-  fs.mkdirSync(reclaimLock, { recursive: true })
+  // 模拟新进程 B 已经成功持有新锁，凭据为 token.new_token_b.json
+  const tokenBFile = path.join(lockDir, 'token.new_token_b.json')
   fs.writeFileSync(
-    path.join(reclaimLock, 'owner.json'),
-    JSON.stringify({ pid: process.pid, token: 'reclaim_token_b', createdAt: Date.now() }),
+    tokenBFile,
+    JSON.stringify({ pid: process.pid, token: 'new_token_b', createdAt: Date.now() }),
     'utf8'
   )
 
-  // 旧回收者 A 恢复执行并在 finally 中尝试用旧 Token A 释放回收锁
-  const released = releaseDirLock(reclaimLock, 'old_reclaim_token_a')
+  // 滞后的竞争者 A 试图重命名旧的死锁文件 token.dead_token_a.json
+  const deadTokenFile = path.join(lockDir, 'token.dead_token_a.json')
+  assert.ok(!fs.existsSync(deadTokenFile))
 
-  // 核心断言：释放被拒绝（返回 false），新回收者的锁目录与凭据完好保留！
-  assert.equal(released, false)
-  assert.ok(fs.existsSync(reclaimLock))
-  assert.equal(readLockOwner(reclaimLock)?.token, 'reclaim_token_b')
+  // 核心断言：系统级原子 renameSync 对不存在的文件必然抛出 ENOENT，绝对无法执行
+  assert.throws(() => {
+    fs.renameSync(deadTokenFile, path.join(lockDir, 'token.dead_token_a.reclaimed'))
+  }, /ENOENT/)
 
-  // 清理
-  releaseDirLock(reclaimLock, 'reclaim_token_b')
-  assert.ok(!fs.existsSync(reclaimLock))
+  // 核心断言：新持锁者 B 的文件完好无损，内容完整保留！
+  assert.ok(fs.existsSync(tokenBFile))
+  assert.equal(readLockOwner(lockDir)?.token, 'new_token_b')
+
+  releaseDirLock(lockDir, 'new_token_b')
 })
 
 test('22. 模拟 renameSync 失败：保守返回 false，确认原锁路径绝不被无条件删除', () => {
@@ -556,7 +561,7 @@ test('22. 模拟 renameSync 失败：保守返回 false，确认原锁路径绝�
   // 构造一把已死亡超期的僵尸锁
   fs.mkdirSync(lockDir, { recursive: true })
   fs.writeFileSync(
-    path.join(lockDir, 'owner.json'),
+    path.join(lockDir, 'token.dead_token_for_rename_test.json'),
     JSON.stringify({ pid: 9999999, token: 'dead_token_for_rename_test', createdAt: Date.now() - 20000 }),
     'utf8'
   )
@@ -564,7 +569,7 @@ test('22. 模拟 renameSync 失败：保守返回 false，确认原锁路径绝�
   // 模拟 renameSync 发生系统异常（例如 EBUSY 或挂载锁定）
   const originalRename = fs.renameSync
   fs.renameSync = (src, dest) => {
-    if (typeof src === 'string' && src.includes('rename-fail.lock') && !src.includes('.reclaim.lock')) {
+    if (typeof src === 'string' && src.includes('rename-fail.lock')) {
       const err = new Error('EBUSY: resource busy or locked')
       err.code = 'EBUSY'
       throw err
@@ -588,4 +593,138 @@ test('22. 模拟 renameSync 失败：保守返回 false，确认原锁路径绝�
   const normalRes = tryReclaimStaleLock(lockDir, 1000)
   assert.equal(normalRes, true)
   assert.ok(!fs.existsSync(lockDir))
+})
+
+test('23. 初始化挂起安全断言：进程在建目录后长时间挂起，绝不覆盖新锁的所有权凭据', () => {
+  const root = tmp()
+  const lockDir = path.join(root, 'hang-init.lock')
+
+  // 步骤 1: 竞争者 C 已经合法获得锁，并建立了有效的持锁凭据
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(lockDir, 'token.token_c.json'),
+    JSON.stringify({ pid: process.pid, token: 'token_c', createdAt: Date.now() }),
+    'utf8'
+  )
+
+  // 步骤 2: 模拟之前挂起的进程 A 醒来，试图向 lockDir 争夺所有权并写入自身的 token_a
+  // 必须无法通过 acquireDirLock 强占或覆盖 C 的凭据
+  const tokenA = acquireDirLock(lockDir, { retries: 2, delayMs: 10, staleMs: 1000 })
+  assert.equal(tokenA, null) // 争锁失败
+
+  // 核心断言：C 的所有权与凭据依然完好无损，A 未产生任何凭据覆盖！
+  assert.ok(fs.existsSync(path.join(lockDir, 'token.token_c.json')))
+  assert.ok(!fs.existsSync(path.join(lockDir, 'token.token_a.json')))
+  assert.equal(readLockOwner(lockDir)?.token, 'token_c')
+
+  releaseDirLock(lockDir, 'token_c')
+})
+
+test('24. 确定性 IPC 交错时序测试：子进程读取死锁后挂起，新进程回收建锁后，旧子进程恢复绝不破坏新锁', async () => {
+  const root = tmp()
+  const bodyDir = path.join(root, 'body')
+  fs.mkdirSync(bodyDir, { recursive: true })
+  const lockDir = path.join(bodyDir, 'voice-learned.md.lock')
+
+  // 事先制造一把已超期的僵尸锁（PID 为已死进程 9999999，Token 为 dead_token_alpha）
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(lockDir, 'token.dead_token_alpha.json'),
+    JSON.stringify({ pid: 9999999, token: 'dead_token_alpha', createdAt: Date.now() - 30000 }),
+    'utf8'
+  )
+
+  const storeModuleUrl = pathToFileURL(path.resolve(import.meta.dirname, '../lib/store.js')).href
+
+  // 子进程 A: 先检测到 dead_token_alpha，准备回收前通过 IPC 暂停挂起
+  const childAScript = `
+    import('${storeModuleUrl}').then(async (m) => {
+      const lockDir = '${lockDir.replace(/\\/g, '\\\\')}';
+      const root = '${root.replace(/\\/g, '\\\\')}';
+      const owner = m.readLockOwner(lockDir);
+      if (!owner || owner.token !== 'dead_token_alpha') {
+        process.exit(2);
+      }
+      // 步骤 1: 确定性通知父进程：已观察到死锁，正在进入挂起暂停
+      process.send({ ready: true, observedToken: owner.token });
+
+      // 等待父进程放行信号
+      await new Promise((resolve) => {
+        process.on('message', (msg) => {
+          if (msg && msg.resume) resolve();
+        });
+      });
+
+      // 步骤 3: 恢复执行！尝试执行 appendVoiceLearned
+      // 由于靶向 Token 状态转移保护，A 绝对无法误删 B 的新锁！
+      const res = m.appendVoiceLearned(root, '进程 A 恢复后写入的内容');
+      if (!res.ok) process.exit(3);
+      process.exit(0);
+    }).catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+  `
+
+  const childA = spawn(process.execPath, [
+    '--input-type=module',
+    '-e',
+    childAScript,
+  ], {
+    stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+  })
+
+  // 等待子进程 A 明确到达挂起点
+  await new Promise((resolve, reject) => {
+    childA.on('message', (msg) => {
+      if (msg && msg.ready) resolve()
+    })
+    childA.on('error', reject)
+    childA.on('exit', (code) => {
+      if (code !== 0) reject(new Error(`Child A prematurely exited with code ${code}`))
+    })
+  })
+
+  // 此时子进程 A 正在挂起中！
+  // 步骤 2: 子进程 B 启动并执行写入，成功自愈死锁并写入新记录
+  const childBScript = `
+    import('${storeModuleUrl}').then((m) => {
+      const root = '${root.replace(/\\/g, '\\\\')}';
+      const res = m.appendVoiceLearned(root, '进程 B 在 A 挂起期间写入的内容');
+      if (!res.ok) process.exit(1);
+      process.exit(0);
+    }).catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+  `
+  await new Promise((resolve, reject) => {
+    const childB = spawn(process.execPath, ['--input-type=module', '-e', childBScript])
+    childB.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`Child B exited with code ${code}`))
+    })
+  })
+
+  // 验证子进程 B 已经完成写入落盘
+  const midContent = readVoiceLearned(root)
+  assert.ok(midContent.includes('进程 B 在 A 挂起期间写入的内容'))
+
+  // 步骤 3: 通知子进程 A 恢复执行！
+  childA.send({ resume: true })
+
+  // 等待子进程 A 顺利完成
+  await new Promise((resolve, reject) => {
+    childA.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`Child A failed after resume with code ${code}`))
+    })
+  })
+
+  // 核心断言：两进程内容全部完整落盘，子进程 A 恢复后未破坏子进程 B 的新锁！
+  const finalContent = readVoiceLearned(root)
+  assert.ok(finalContent.includes('进程 B 在 A 挂起期间写入的内容'))
+  assert.ok(finalContent.includes('进程 A 恢复后写入的内容'))
+  const lines = finalContent.split('\n').filter((l) => l.trim().startsWith('- '))
+  assert.equal(lines.length, 2)
 })

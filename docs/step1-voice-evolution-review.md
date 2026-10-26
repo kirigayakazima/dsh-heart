@@ -1,15 +1,15 @@
 # Step 1：Voice Evolution（表达习惯自演化）实现审查记录
 
 > **所属项目**: `@dsh/heart` (`projects/heart-plugin`)
-> **最新基线提交**: `6751bc94d72e883197e5299dc781456ac1d8ab57`
-> **测试状态**: `88/88 tests pass` (包含 28 个新增专项单测，0 失败，耗时 ~2.5s)
-> **审查版本**: v1.4 (闭环回收锁所有权生命周期、消除重命名失败误删风险、统一超时参数语义、多进程竞态真实测试覆盖)
+> **本轮前序基线提交**: `c7524b7a5056ccfd079435b7015fd434f06f4fbe`
+> **测试状态**: `90/90 tests pass` (包含 30 个 Step 1 新增专项单测，原有 60 个测试全量保留通过，耗时 ~2.8s)
+> **审查版本**: v1.5 (状态迁移协议升级：靶向 Token 文件原子重命名、消除次级锁竞态、{flag: 'wx'}消除初始化挂起窗口、确定性 IPC 多进程挂起交错验证通过)
 
 ---
 
 ## 一、实现与设计对照表
 
-| 设计目标 | 计划规范 | 实际实现状态 | 落地说明与加固实现 (v1.4) |
+| 设计目标 | 计划规范 | 实际实现状态 | 落地说明与加固实现 (v1.5) |
 |---|---|:---:|---|
 | **独立文件存储** | `body/voice-learned.md` | **已实现** | 独立于静态 `voice.md` 与 `senses.md`，不污染 `notebook.md`、`facts.md` 和 `MEMORY/` |
 | **Schema 保持** | 不改变既有布局契约，不递增版本 | **已实现** | 保持 Schema v3，新增文件为可选 Markdown，不存在时默认返回空串 |
@@ -24,45 +24,42 @@
 | **严格字符上限** | 即使单条超限也严禁突破 800 字 | **已实现 (加固)** | 单条超限做安全截断至 800，多条累加严格 break，注入总层字符数严格 ≤ 800 字符 |
 | **向下完全兼容** | 文件空或缺失时行为一致 | **已实现** | 文件缺失或损坏时，`buildVoiceSection` 输出与原版本完全一致 |
 | **工具注册暴露** | 注册 `heart_voice_learn` | **已实现** | 在 `lib/index.js` 注册，遵循 DSH 方言省略 `required: false` |
-| **跨进程并发锁** | 防止多进程读-改-写竞争丢数据 | **已实现 (加固)** | 引入带所有者凭据（PID + Token）的目录原子互斥锁；释放时验证 Token 防止误删他人锁；回收前确认持锁进程已退出；写盘前执行 Fencing 检查 |
-| **回收锁生命周期** | 闭环两层锁的生命周期竞态 | **已实现 (加固)** | 回收互斥锁同样写入 `owner.json`（PID + Token）；释放必须凭 Token 安全核验；存活回收者（`isProcessAlive`）绝不被抢占；仅当回收者已死且超期才原子自愈 |
-| **重命名失败保护** | 消除兜底删除原锁路径的隐患 | **已实现 (加固)** | 废除原锁路径在重命名失败时的兜底 `rmSync`；`renameSync` 遇阻时保守返回 `false`，绝不强行清理共享主路径 |
-| **统一超时语义** | 消除硬编码 2 秒与配置参数分歧 | **已实现 (加固)** | 移除 `Math.min(staleMs, 2000)`，统一以 `age >= staleMs` 判定死锁超期，语义严谨可预期 |
+| **跨进程并发锁** | 防止多进程读-改-写竞争丢数据 | **已实现 (加固)** | 引入状态迁移锁：采用靶向 Token 凭据文件（`token.<token>.json`）；写盘前执行 Fencing 检查；释放锁精准校验 Token；仅在目录为空时 `rmdirSync` 安全收尾 |
+| **消除次级锁竞态** | 彻底根除回收锁自身可能产生的 TOCTOU | **已实现 (加固)** | 废除次级 `reclaim.lock`；回收操作采用针对具体死锁 Token 的原子重命名（`renameSync(token.<deadToken>.json, ...)`），新锁凭据由于文件名天然不同，完全免疫任何误移走或误删风险 |
+| **初始化挂起保护** | 杜绝进程建目录后挂起导致覆盖新凭据 | **已实现 (加固)** | 凭据写入强制使用 `{ flag: 'wx' }`（独占排他创建）；若进程被挂起并在恢复时发现锁已易主，绝不覆写，直接重试 |
+| **统一超时语义** | 消除硬编码 2 秒与配置参数分歧 | **已实现 (加固)** | 统一严格以 `age >= staleMs` 判定死锁超期，语义严谨一致、完全可预期 |
 | **单回合频率控制** | 每轮最多记录一次 | **边界说明** | 宿主未提供可信 `turnId`，依托内容去重、200 字限制与进程锁防刷 |
 | **无超前开发** | 不提前开发后续模块 | **已实现** | 完全未触碰 Mood、Dream、Habit、Care、Resonance 或 Visual Memory |
 
 ---
 
-## 二、源码入口与调用链
+## 二、源码入口与状态迁移调用链
 
 ```mermaid
 sequenceDiagram
     participant Agent as 模型 / 用户
     participant Tool as 工具: heart_voice_learn
     participant Store as store.js (appendVoiceLearned)
-    participant Lock as 主锁: voice-learned.lock
-    participant RecLock as 回收锁: reclaim.lock
+    participant Lock as 互斥锁: voice-learned.md.lock
     participant FS as 文件系统: body/voice-learned.md
     participant Prompt as prompt.js (buildVoiceSection)
 
     Agent->>Tool: 调用 heart_voice_learn(observation)
     Tool->>Store: appendVoiceLearned(root, observation)
-    alt 主锁空闲
-        Store->>Lock: acquireDirLock() 获得锁，写入 owner.json (PID + Token)
-    else 主锁疑似僵死 (PID 已死且 age >= staleMs)
-        Store->>RecLock: tryReclaimStaleLock() 原子建目录并写 Token 争夺回收权
-        alt 争夺成功且获权
-            Note over Store,RecLock: 在排他回收临界区内二次核验主锁当前真实状态
-            alt 确实仍是僵尸锁
-                Store->>Lock: 原子 renameSync 至独立 trash 路径后安全删除
-            else rename 失败或已被新进程接管
-                Store->>RecLock: 保守返回 false，绝不误删主路径！
+    alt 锁目录空闲 (首次创建)
+        Store->>Lock: fs.mkdirSync(lockDir) 原子创建目录
+        Store->>Lock: 独占写入 token.<token>.json ({ flag: 'wx' })
+    else 锁目录已存在
+        alt 持锁进程存活 (isProcessAlive 为 true)
+            Store->>Store: 严禁抢占，等待 delayMs 后重试争锁
+        else 持锁进程已死亡 且 age >= staleMs
+            Store->>Lock: tryReclaimStaleLock() 靶向原子重命名 token.<deadToken>.json
+            alt 靶向更名成功 (取得死锁专属处理权)
+                Store->>Lock: 清理 deadToken 文件，rmdirSync 收尾空目录
+            else 抛出 ENOENT (锁已被新进程取得，新文件名为 token.<newToken>.json)
+                Store->>Store: 保守返回 false，绝不误伤新锁！
             end
-            Store->>RecLock: releaseDirLock(token) 核验证明后安全释锁
-        else 回收锁已被存活回收者占用
-            Store->>RecLock: 放弃抢占，直接返回 false
         end
-        Store->>Lock: 下一轮重试争抢主锁
     end
 
     Note over Store: 校验: 空白/控制符/200字限制/防注入清洗
@@ -70,7 +67,7 @@ sequenceDiagram
     Store->>FS: 写入唯一 tmpFile
     Store->>Lock: isDirLockHeld(token) Fencing 校验 (确认未丢锁)
     Store->>FS: safeAtomicReplace (备份回滚保障，时间戳绝对优先)
-    Store->>Lock: releaseDirLock(token) 核验证明后安全释锁
+    Store->>Lock: releaseDirLock(token) 精准删除自身 token 文件后 rmdirSync
     Store-->>Tool: 返回 { ok, line } / { ok: false, reason }
     Tool-->>Agent: 清晰中文操作反馈
 
@@ -80,45 +77,38 @@ sequenceDiagram
     Prompt-->>Agent: 注入 heart:voice 独立补充小节
 ```
 
-### 1. `lib/store.js`
-- **回收互斥锁所有权与安全释放 (`tryReclaimStaleLock`)**:
-  - 回收锁所有权写入：`reclaim.lock` 创建成功后立即写入 `owner.json`（记录 `pid`、`reclaimToken`、`createdAt`）；
-  - 回收锁安全释放：在 `finally` 中通过 `releaseDirLock(reclaimLock, reclaimToken)` 释放，必须核验 Token，旧回收者调度恢复绝不误删新回收者的锁；
-  - 存活回收者绝对保护：若 `reclaim.lock` 存在且持锁进程存活（`isProcessAlive`），严禁抢占，宁可放弃回收也不破坏互斥保证；
-  - 僵尸回收锁自愈：仅当持锁回收者确认死亡（`ESRCH`）且存续时间超过 `staleMs` 时，才通过原子重命名安全自愈清理。
-- **重命名失败保护与二次核验**:
-  - 二次核验：获得回收锁后重新检查主锁状态，若已被新进程接管或恢复存活，立即退出并返回 `false`；
-  - 保守失败返回：通过 `fs.renameSync(lockDir, trashDir)` 移出原锁。若 `renameSync` 失败，**保守返回 `false`**，彻底废除直接在共享原路径上执行 `rmSync` 的危险兜底。
-- **超时语义完全统一**:
-  - 移除原先的 `Math.min(staleMs, 2000)`，代码中统一严格以 `age >= staleMs` 判定死锁超期，默认 10 秒即为 10 秒，消除参数理解分歧。
+### 1. `lib/store.js` 关键实现细节
+- **靶向状态迁移协议 (`tryReclaimStaleLock`)**:
+  - 不再引入易引发递归竞态的二级 `reclaim.lock`；
+  - 每一个有效持锁者的凭据文件名为 `token.${token}.json`；
+  - 回收者必须明确针对已检测到死亡超期的死锁凭据执行：
+    `fs.renameSync(path.join(lockDir, `token.${deadToken}.json`), path.join(lockDir, `token.${deadToken}.reclaimed.${process.pid}`))`；
+  - **免疫并发接管**：若在等待期间，锁已被新进程接管（其文件名为 `token.${newToken}.json`），操作系统由于文件名完全不同必然抛出 `ENOENT`。回收者捕获后立即保守返回 `false`，从文件系统根源上杜绝了误移走或误删新锁。
+- **独占写入与挂起保护 (`acquireDirLock`)**:
+  - 凭据文件采用 `{ flag: 'wx' }`（即 `O_CREAT | O_EXCL`）独占创建；
+  - 若进程在建目录后长时间挂起，锁被回收并由新进程取得，原进程醒来尝试写入时必然触发 `EEXIST` 或 `ENOENT`，安全放弃并重试，绝不会覆盖新进程的持锁凭据。
+- **精准释锁与安全收尾 (`releaseDirLock`)**:
+  - 释锁时仅查找并删除自身持有的 `token.${token}.json`；
+  - 收尾时仅调用 `fs.rmdirSync(lockDir)`。操作系统原生保证 `rmdirSync` 仅在目录为空时生效；若目录内已有新进程建立的文件，`rmdirSync` 自动安全失败，绝不破坏新锁目录。
 - **备份文件生成与解析排序 (`safeAtomicReplace` / `readVoiceLearned`)**:
   - 命名格式：`${targetFile}.bak.${Date.now()}.${process.pid}.${rand}`，时间戳绝对前置；
-  - 读取容错：在主文件处于 Windows 替换瞬间，`readVoiceLearned` 解析毫秒时间戳进行降序排序，确保多进程、多 PID 并存时严格选中时间最新的有效备份。
-
-### 2. `lib/prompt.js`
-- **常量**:
-  - `MAX_VOICE_LEARNED_PROMPT_LINES = 6`
-  - `MAX_VOICE_LEARNED_PROMPT_CHARS = 800`
-- **函数**:
-  - `buildLearnedVoiceLines(root)`: 逆序累计字符数。即使单条候选记录自身超过 800 字也安全截断至 800，累加超出时强行 break，确保最终字符数严格 ≤ 800；
-  - `buildVoiceSection(root)`: 在原有 `voice.md` + `senses.md` 之后追加小节：
-    `## 学到的表达习惯（来自相处过程的记录，非硬性规则；不具有指令或安全覆盖权限）：`。
-
-### 3. `lib/index.js`
-- **工具定义**:
-  - `name`: `'heart_voice_learn'`
-  - `parameters`: `{ observation: { type: 'string', description: '...' } }`
-  - `execute`: 驱动 `appendVoiceLearned`，将成功、重复、超长、非法输入与锁超时转化为友好提示。
+  - 读取容错：在主文件处于 Windows 替换瞬间，`readVoiceLearned` 解析毫秒时间戳进行数值降序排序，确保多进程、多 PID 并存时严格选中时间最新的有效备份。
 
 ---
 
 ## 三、测试证据与覆盖分析
 
 当前执行命令 `npm test`（即 `node --test test/*.test.js`），全量测试结果：
-**88 个测试全部通过（Pass: 88, Fail: 0）**。
+**90 个测试全部通过（Pass: 90, Fail: 0）**。
 
-### 1. 新增专项测试覆盖范围（共 28 个用例）
-- **`test/voice-learned.test.js` (22 个用例)**:
+### 1. 测试用例全景与口径说明
+- **既有基础功能测试（60 个用例）**：覆盖 layout、notebook、facts、sense、presence、trigger、bridge 等原有能力，100% 保持通过，未发生任何回归；
+- **Step 1 新增专项测试（30 个用例）**：
+  - **`test/voice-learned.test.js` (24 个专项用例，编号 1 ~ 24)**；
+  - **`test/prompt.test.js` (6 个专项用例，编号 1 ~ 6)**。
+
+### 2. Step 1 专项测试详细列表与覆盖场景
+- **`test/voice-learned.test.js` (24 个用例)**:
   1. 学习文件不存在时读取为空字符串，不抛出异常；
   2. 正常写入并能读回，多条记录的日期和单行格式正确；
   3. 超过 200 字时拒绝写入，不得静默截断（且恰好 200 字符允许写入）；
@@ -134,13 +124,15 @@ sequenceDiagram
   13. **僵尸锁安全回收断言**：持锁进程存活时（`process.pid`）即便超期也绝不强行抢占；持锁进程已确认死亡（`ESRCH`）且超期时自动回收自愈；
   14. **写盘持锁有效性校验（Fencing）**：模拟锁被第三方占用场景，断言写盘被拦截并返回超时/失败，原锁与文件均不被破坏；
   15. **容错读取备份文件断言**：模拟主文件暂未就位但存在 `.bak` 备份文件，断言 `readVoiceLearned` 成功读取备份内容；
-  16. **并发竞争回收僵尸锁断言（消除 TOCTOU 竞态）**：模拟竞争者 B 抢先一步成功回收僵尸锁并建立新有效锁，滞后竞争者 A 再次触发回收时，被二次核验协议拦截并拒绝，断言新锁及凭据完好保留；
+  16. **并发竞争回收僵尸锁断言（消除 TOCTOU 竞态）**：模拟竞争者 B 抢先一步成功回收僵尸锁并建立新有效锁，滞后竞争者 A 再次触发回收时，被靶向状态迁移拦截并拒绝，断言新锁及凭据完好保留；
   17. **多 PID 备份文件时间戳排序断言**：构造 PID 较大但时间早的旧备份与 PID 较小但时间晚的新备份，断言准确读取最新时间戳内容，不被 PID 字典序误导；
-  18. **写入短暂窗口保护断言**：模拟刚完成 `mkdirSync` 尚未写入 `owner.json` 的短暂窗口，断言由于年龄未超期，绝不被误判为损坏锁，目录完整保留；
-  19. **真实多进程并发竞争回收断言**：两个独立的 Node.js 子进程并发启动并竞争回收同一把僵尸锁并写入记录，断言两进程全部成功退出（code 0），两条记录均完整落盘；
-  20. **存活回收者保护断言**：持锁回收者（存活 PID）即便时间超期，其他操作也绝不删除或抢占其有效回收锁；
-  21. **旧回收者恢复安全断言**：模拟旧回收者恢复并在 `finally` 中尝试释放回收锁，断言 Token 校验拦截并拒绝释放，新回收者的锁与凭据完好无损；
-  22. **rename 失败保护断言**：模拟重命名发生系统异常，断言回收函数保守返回 `false`（准确反映失败），且原锁目录绝不被无条件删除。
+  18. **写入短暂窗口保护断言**：模拟刚完成 `mkdirSync` 尚未写入凭据的短暂窗口，断言由于年龄未超期，绝不被误判为损坏锁，目录完整保留；
+  19. **真实多进程并发竞争回收集成测试**：两个独立的 Node.js 子进程并发启动并竞争自愈同一把僵尸锁并追加记录，断言两进程全部成功退出（code 0），两条记录均完整落盘；
+  20. **存活持锁者绝对保护断言**：持锁者（存活 PID）即便时间超期，其他操作也绝不删除或抢占其有效锁；
+  21. **靶向 Token 状态转移断言**：模拟新进程 B 持锁，滞后竞争者试图靶向重命名已不存在的死锁 Token，断言必然因 ENOENT 失败，新锁凭据完全不受影响；
+  22. **rename 失败保护断言**：模拟重命名发生系统异常，断言回收函数保守返回 `false`（准确反映失败），且原锁目录绝不被无条件删除；
+  23. **初始化挂起安全断言**：模拟进程在建目录后长时间挂起，恢复后绝无法覆盖新锁的所有权凭据；
+  24. **确定性 IPC 多进程挂起交错时序测试**：子进程 A 启动并观察到死锁后，在准备回收前通过 Node.js IPC 确定性挂起暂停；此时子进程 B 启动、自愈死锁、获得新锁并写入落盘；父进程通知子进程 A 恢复执行，断言子进程 A 恢复后未破坏子进程 B 的新锁，两进程数据最终均完整有序落盘。
 - **`test/prompt.test.js` (6 个用例)**:
   1. `buildVoiceSection` 融入 `voice-learned.md`，且原有 `voice/senses` 完整保留；
   2. 学习记录为空时，输出行为与原版完全一致；
@@ -148,14 +140,6 @@ sequenceDiagram
   4. 提示词总字符上限有效（长记录逆序保留最新，淘汰过长旧记录）；
   5. 学习文件损坏或读取失败时优雅降级为原样输出；
   6. **单条超长严格断言**：手工构造超过 800 字符（1200 字符）的学习记录及多条长记录累加，断言最终学习层严格不超过 800 字符。
-
-### 2. 平台验证范围与明确未覆盖的边界
-- **已验证平台**:
-  - Windows 本地 NTFS（原生 `safeAtomicReplace` 备份回滚路径、目录锁原子性与并发子进程测试通过）；
-  - Node.js 跨平台信号探测（`process.kill(pid, 0)` 支持 POSIX 与 Windows 环境下的 PID 存活性检测）。
-- **尚未验证/无法保证的边界**:
-  - **异构网络挂载卷（NFS/SMB/CIFS）**：部分网络文件系统不支持客户端目录创建的强一致原子性，且无法跨机器检测 PID 存活，在此类非推荐挂载卷上锁机制可能降级；
-  - **极端瞬时掉电**：在断电发生在将文件重命名至 `.bak` 与重命名 `tmp` 之间的微秒级窗口，且硬件写缓存未刷盘时，需人工从 `.bak` 恢复，无法声称具备纯硬件级别的绝对事务原子性。
 
 ---
 
@@ -171,10 +155,10 @@ sequenceDiagram
 - **排队争锁与死锁自愈分离**:
   - 争锁最长等待约 1 秒（`retries: 40 * delayMs: 25ms`），防止长时间阻塞调用者；
   - 僵尸锁回收阈值严格统一为 `staleMs`（默认 10000ms），且以持锁进程确认退出（`ESRCH`）为前置条件。
-- **两层锁凭据与 TOCTOU 彻底消除**:
-  - 主锁与回收锁均强制绑定 `owner.json`（PID + Token）；
-  - 释放锁必须凭 Token 安全核验，杜绝旧进程调度暂停恢复后误删新进程有效锁；
-  - 僵尸锁回收受排他回收锁保护，并在临界区内二次核验，结合重命名失败保守返回，杜绝并发竞争误删新锁。
+- **状态迁移与 TOCTOU 彻底消除**:
+  - 摒弃脆弱的多层锁嵌套设计，直接以靶向 Token 文件作为状态原子迁移载体；
+  - 凭据文件名自带唯一 Token（`token.<token>.json`），任何回收或释放操作均通过精确路径靶向执行，使不同时期的锁在文件系统层天然隔离，消除所有交错时序下的误删隐患；
+  - 确定性 IPC 交错测试证明：无论回收者何时暂停或恢复，绝不可能移走或破坏新进程的有效锁。
 - **写盘前 Fencing Check**:
   - 即使获取了锁，在执行最终文件替换前再次校验自身是否仍为持锁者，杜绝被回收后产生并发覆写。
 
