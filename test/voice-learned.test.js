@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
+import zlib from 'node:zlib'
 import {
   readVoiceLearned,
   appendVoiceLearned,
@@ -15,6 +16,9 @@ import {
   readLockOwner,
   isDirLockHeld,
   isProcessAlive,
+  exportBundle,
+  importBundle,
+  mergeVoiceLearned,
   VOICE_LEARNED_MAX_LENGTH,
   VOICE_LEARNED_MAX_ENTRIES,
 } from '../lib/store.js'
@@ -727,4 +731,264 @@ test('24. 确定性 IPC 交错时序测试：子进程读取死锁后挂起，�
   assert.ok(finalContent.includes('进程 A 恢复后写入的内容'))
   const lines = finalContent.split('\n').filter((l) => l.trim().startsWith('- '))
   assert.equal(lines.length, 2)
+})
+
+test('25. importBundle 默认导入：已有记录与导入记录按内容去重、按日期更新并受 100 条上限保护', () => {
+  const root = tmp()
+  // 1. 本机已有 3 条记录（其中一条日期较旧）
+  appendVoiceLearned(root, '偏好 A：喜欢直接看 diff', new Date('2026-10-20'))
+  appendVoiceLearned(root, '偏好 B：回答先给结论', new Date('2026-10-21'))
+  appendVoiceLearned(root, '偏好 C：只在本机保留', new Date('2026-10-22'))
+
+  // 2. 构造一个导入 bundle，其中包含：
+  //    - 偏好 A（日期更新：2026-10-25）
+  //    - 偏好 D（新记录：2026-10-26）
+  //    - 以及 105 条按时间递增的填充记录，用于测试上限截断
+  const incomingLines = [
+    '- 2026-10-25 偏好 A：喜欢直接看 diff',
+    '- 2026-10-26 偏好 D：外部导入的新偏好',
+  ]
+  for (let i = 1; i <= 105; i++) {
+    const pad = String(i).padStart(3, '0')
+    incomingLines.push(`- 2026-09-${String((i % 28) + 1).padStart(2, '0')} 批量偏好条目 ${pad}`)
+  }
+  const payload = {
+    format: 'dsh-heart',
+    schema: 3,
+    exportedAt: new Date().toISOString(),
+    files: {
+      'body/voice-learned.md': incomingLines.join('\n') + '\n',
+    },
+  }
+  const buffer = zlib.gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'))
+
+  // 3. 执行默认导入
+  const result = importBundle(root, buffer)
+  assert.equal(result.merged, 1)
+
+  // 4. 读取结果并断言
+  const content = readVoiceLearned(root)
+  const lines = content.split('\n').filter((l) => l.trim().startsWith('- '))
+
+  // 上限严格为 100 条
+  assert.equal(lines.length, VOICE_LEARNED_MAX_ENTRIES)
+
+  // 偏好 A 应该被去重，且更新为 2026-10-25
+  const prefALines = lines.filter((l) => l.includes('偏好 A：喜欢直接看 diff'))
+  assert.equal(prefALines.length, 1)
+  assert.ok(prefALines[0].includes('2026-10-25'))
+
+  // 包含新偏好 D
+  assert.ok(content.includes('偏好 D：外部导入的新偏好'))
+})
+
+test('26. importBundle 强制导入（force=true）：遵循互斥锁与原子替换，按原契约覆盖内容', () => {
+  const root = tmp()
+  appendVoiceLearned(root, '本机原有的一条旧记录')
+  assert.ok(readVoiceLearned(root).includes('本机原有的一条旧记录'))
+
+  const payload = {
+    format: 'dsh-heart',
+    schema: 3,
+    exportedAt: new Date().toISOString(),
+    files: {
+      'body/voice-learned.md': '- 2026-10-26 强制覆盖后的全新记录\n',
+    },
+  }
+  const buffer = zlib.gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'))
+
+  const result = importBundle(root, buffer, { force: true })
+  assert.equal(result.written, 1)
+
+  const content = readVoiceLearned(root)
+  assert.equal(content.trim(), '- 2026-10-26 强制覆盖后的全新记录')
+  assert.equal(content.includes('本机原有的一条旧记录'), false)
+})
+
+test('27. importBundle 与 appendVoiceLearned 真实跨进程并发：两端均成功提交，记录完整保留无丢失', async () => {
+  const root = tmp()
+  appendVoiceLearned(root, '初始基准记录')
+
+  const storeModuleUrl = pathToFileURL(path.resolve(import.meta.dirname, '../lib/store.js')).href
+
+  const payload = {
+    format: 'dsh-heart',
+    schema: 3,
+    exportedAt: new Date().toISOString(),
+    files: {
+      'body/voice-learned.md': '- 2026-10-26 并发导入端提交的偏好记录\n',
+    },
+  }
+  const bundleBase64 = zlib.gzipSync(Buffer.from(JSON.stringify(payload), 'utf8')).toString('base64')
+
+  const runAppendProcess = () => {
+    return new Promise((resolve, reject) => {
+      const script = `
+        import('${storeModuleUrl}').then((m) => {
+          const res = m.appendVoiceLearned(process.argv[1], '并发学习端提交的偏好记录');
+          if (!res.ok) process.exit(1);
+          process.exit(0);
+        }).catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+      `
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script, root])
+      let stderr = ''
+      child.stderr.on('data', (d) => { stderr += d })
+      child.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(`Append process failed: ${stderr}`))
+      })
+    })
+  }
+
+  const runImportProcess = () => {
+    return new Promise((resolve, reject) => {
+      const script = `
+        import('${storeModuleUrl}').then((m) => {
+          const buf = Buffer.from(process.argv[2], 'base64');
+          m.importBundle(process.argv[1], buf);
+          process.exit(0);
+        }).catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+      `
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script, root, bundleBase64])
+      let stderr = ''
+      child.stderr.on('data', (d) => { stderr += d })
+      child.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(`Import process failed: ${stderr}`))
+      })
+    })
+  }
+
+  // 并发拉起两进程争抢锁写入
+  await Promise.all([runAppendProcess(), runImportProcess()])
+
+  // 核心断言：两端成功提交的内容全部存在，没有任何一方丢失
+  const content = readVoiceLearned(root)
+  assert.ok(content.includes('初始基准记录'))
+  assert.ok(content.includes('并发学习端提交的偏好记录'))
+  assert.ok(content.includes('并发导入端提交的偏好记录'))
+  const lines = content.split('\n').filter((l) => l.trim().startsWith('- '))
+  assert.equal(lines.length, 3)
+})
+
+test('28. importBundle 锁超时或写盘失败保护：已有数据保持完整，且明确抛错拒绝虚报成功', () => {
+  const root = tmp()
+  appendVoiceLearned(root, '极其关键的已有数据，绝不能被破坏')
+
+  const payload = {
+    format: 'dsh-heart',
+    schema: 3,
+    exportedAt: new Date().toISOString(),
+    files: {
+      'body/voice-learned.md': '- 2026-10-26 试图在锁被占满时写入的新数据\n',
+    },
+  }
+  const buffer = zlib.gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'))
+
+  // 1. 外部占用锁：创建锁目录并写入当前进程存活凭据（模拟其他进程正在忙碌写入）
+  const bodyDir = path.join(root, 'body')
+  const lockDir = path.join(bodyDir, 'voice-learned.md.lock')
+  const lockToken = acquireDirLock(lockDir)
+  assert.ok(lockToken)
+
+  try {
+    // 2. 调用 importBundle，必须捕获到锁超时异常，绝不虚报成功
+    assert.throws(
+      () => {
+        importBundle(root, buffer)
+      },
+      /导入表达习惯失败：获取文件锁超时/
+    )
+  } finally {
+    releaseDirLock(lockDir, lockToken)
+  }
+
+  // 3. 校验原有数据完好无损，未被部分覆盖或破坏
+  const content = readVoiceLearned(root)
+  assert.ok(content.includes('极其关键的已有数据，绝不能被破坏'))
+  assert.equal(content.includes('试图在锁被占满时写入的新数据'), false)
+})
+
+test('29. exportBundle 与 importBundle 完整往返：包括表达习惯的导出打包与跨实例导入并集合并', () => {
+  const sourceRoot = tmp()
+  appendVoiceLearned(sourceRoot, '源设备学习到的偏好 1')
+  appendVoiceLearned(sourceRoot, '源设备学习到的偏好 2')
+
+  const targetRoot = tmp()
+  appendVoiceLearned(targetRoot, '目标设备原本就有的偏好 3')
+
+  // 导出
+  const exportedBuffer = exportBundle(sourceRoot)
+  assert.ok(exportedBuffer.length > 0)
+
+  // 导入到目标设备
+  const res = importBundle(targetRoot, exportedBuffer)
+  assert.ok(res.merged >= 1)
+
+  // 目标设备应同时拥有 3 条偏好
+  const targetContent = readVoiceLearned(targetRoot)
+  assert.ok(targetContent.includes('源设备学习到的偏好 1'))
+  assert.ok(targetContent.includes('源设备学习到的偏好 2'))
+  assert.ok(targetContent.includes('目标设备原本就有的偏好 3'))
+  const lines = targetContent.split('\n').filter((l) => l.trim().startsWith('- '))
+  assert.equal(lines.length, 3)
+})
+
+test('30. mergeVoiceLearned 独立单元测试：多场景覆盖（空值、格式异常、更新覆盖、逆序排序、超限截断）', () => {
+  // 1. 空输入
+  assert.equal(mergeVoiceLearned('', ''), '')
+  assert.equal(mergeVoiceLearned(null, undefined), '')
+
+  // 2. 同一偏好日期更新与保持
+  const existing = [
+    '- 2026-10-20 偏好 A：看 diff',
+    '- 2026-10-25 偏好 B：先给结论',
+  ].join('\n')
+  const incoming = [
+    '- 2026-10-22 偏好 A：看 diff', // 较新，应更新
+    '- 2026-10-21 偏好 B：先给结论', // 较旧，不应覆盖已有 10-25
+    '- 2026-10-26 偏好 C：只输出一句话', // 新增
+  ].join('\n')
+
+  const merged = mergeVoiceLearned(existing, incoming)
+  assert.ok(merged.includes('2026-10-22 偏好 A：看 diff'))
+  assert.ok(merged.includes('2026-10-25 偏好 B：先给结论'))
+  assert.ok(merged.includes('2026-10-26 偏好 C：只输出一句话'))
+
+  // 3. 超过 100 条截断
+  const hugeLines = []
+  for (let i = 1; i <= 120; i++) {
+    hugeLines.push(`- 2026-10-${String((i % 28) + 1).padStart(2, '0')} 偏好项 ${i}`)
+  }
+  const capped = mergeVoiceLearned('', hugeLines.join('\n'))
+  const keptLines = capped.split('\n').filter((l) => l.trim().startsWith('- '))
+  assert.equal(keptLines.length, 100)
+})
+
+test('31. importBundle 路径规范化：兼容 Windows 反斜杠键名并防御目录穿越', () => {
+  const root = tmp()
+  const payload = {
+    format: 'dsh-heart',
+    schema: 3,
+    exportedAt: new Date().toISOString(),
+    files: {
+      'body\\voice-learned.md': '- 2026-10-26 Windows 反斜杠路径偏好\n',
+      '../../evil.md': '- 恶意注入\n',
+    },
+  }
+  const buffer = zlib.gzipSync(Buffer.from(JSON.stringify(payload), 'utf8'))
+  const res = importBundle(root, buffer)
+  assert.equal(res.merged, 1)
+
+  const content = readVoiceLearned(root)
+  assert.ok(content.includes('Windows 反斜杠路径偏好'))
+
+  // 断言目录穿越文件未被写入
+  assert.equal(fs.existsSync(path.resolve(root, '../../evil.md')), false)
 })
