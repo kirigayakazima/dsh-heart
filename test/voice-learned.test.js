@@ -436,3 +436,156 @@ test('18. owner.json 写入短暂窗口安全：创建中途的新锁不被误�
   // 核心断言：由于 lockDir 年龄未超过 staleMs，绝不被误判为损坏锁，目录完整保留
   assert.ok(fs.existsSync(lockDir))
 })
+
+test('19. 两个独立子进程真实并发竞争回收同一把僵尸锁：自愈与写入全部成功且无丢失', async () => {
+  const root = tmp()
+  const bodyDir = path.join(root, 'body')
+  fs.mkdirSync(bodyDir, { recursive: true })
+  const lockDir = path.join(bodyDir, 'voice-learned.md.lock')
+
+  // 事先制造一把已超期的僵尸锁（PID 为已死进程 9999999，时间超期）
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: 9999999, token: 'dead_initial_token', createdAt: Date.now() - 30000 }),
+    'utf8'
+  )
+
+  const storeModuleUrl = pathToFileURL(path.resolve(import.meta.dirname, '../lib/store.js')).href
+
+  const runSubprocess = (entryText) => {
+    return new Promise((resolve, reject) => {
+      const script = `
+        import('${storeModuleUrl}').then((m) => {
+          const res = m.appendVoiceLearned(process.argv[1], process.argv[2]);
+          if (!res.ok) {
+            console.error(res);
+            process.exit(1);
+          }
+          process.exit(0);
+        }).catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+      `
+      const child = spawn(process.execPath, [
+        '--input-type=module',
+        '-e',
+        script,
+        root,
+        entryText,
+      ])
+      let stderr = ''
+      child.stderr.on('data', (d) => { stderr += d })
+      child.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(`Subprocess exited with code ${code}: ${stderr}`))
+      })
+    })
+  }
+
+  // 两个独立 Node 子进程同时并发竞争回收僵尸锁并执行写入
+  await Promise.all([
+    runSubprocess('并发回收进程 A 写入的记录'),
+    runSubprocess('并发回收进程 B 写入的记录'),
+  ])
+
+  const content = readVoiceLearned(root)
+  // 断言两条记录均安全落盘，僵尸锁被成功回收且两进程互斥有效未发生误删覆盖
+  assert.ok(content.includes('并发回收进程 A 写入的记录'))
+  assert.ok(content.includes('并发回收进程 B 写入的记录'))
+  const lines = content.split('\n').filter((l) => l.trim().startsWith('- '))
+  assert.equal(lines.length, 2)
+})
+
+test('20. 回收者持有回收锁期间暂停，存活回收者的锁绝不因超时被强行抢占或误删', () => {
+  const root = tmp()
+  const lockDir = path.join(root, 'reclaim-alive.lock')
+  const reclaimLock = `${lockDir}.reclaim.lock`
+
+  // 模拟回收者进程（当前存活进程 PID）持有 reclaim.lock，且时间戳较旧（60秒前）
+  fs.mkdirSync(reclaimLock, { recursive: true })
+  fs.writeFileSync(
+    path.join(reclaimLock, 'owner.json'),
+    JSON.stringify({ pid: process.pid, token: 'alive_reclaimer', createdAt: Date.now() - 60000 }),
+    'utf8'
+  )
+
+  // 另一个操作尝试回收僵尸锁
+  assert.equal(isProcessAlive(process.pid), true)
+  const res = tryReclaimStaleLock(lockDir, 1000)
+
+  // 核心断言：检测到持锁回收者依然存活，宁可放弃回收也绝不删除或抢占有效回收锁
+  assert.equal(res, false)
+  assert.ok(fs.existsSync(reclaimLock))
+  assert.equal(readLockOwner(reclaimLock)?.token, 'alive_reclaimer')
+
+  // 安全清理
+  releaseDirLock(reclaimLock, 'alive_reclaimer')
+})
+
+test('21. 模拟旧回收者恢复执行，核验 Token 证明其无法误删新回收者的回收锁', () => {
+  const root = tmp()
+  const reclaimLock = path.join(root, 'test.reclaim.lock')
+
+  // 模拟新回收者 B 已经合法占有回收锁，写入 Token B
+  fs.mkdirSync(reclaimLock, { recursive: true })
+  fs.writeFileSync(
+    path.join(reclaimLock, 'owner.json'),
+    JSON.stringify({ pid: process.pid, token: 'reclaim_token_b', createdAt: Date.now() }),
+    'utf8'
+  )
+
+  // 旧回收者 A 恢复执行并在 finally 中尝试用旧 Token A 释放回收锁
+  const released = releaseDirLock(reclaimLock, 'old_reclaim_token_a')
+
+  // 核心断言：释放被拒绝（返回 false），新回收者的锁目录与凭据完好保留！
+  assert.equal(released, false)
+  assert.ok(fs.existsSync(reclaimLock))
+  assert.equal(readLockOwner(reclaimLock)?.token, 'reclaim_token_b')
+
+  // 清理
+  releaseDirLock(reclaimLock, 'reclaim_token_b')
+  assert.ok(!fs.existsSync(reclaimLock))
+})
+
+test('22. 模拟 renameSync 失败：保守返回 false，确认原锁路径绝不被无条件删除', () => {
+  const root = tmp()
+  const lockDir = path.join(root, 'rename-fail.lock')
+
+  // 构造一把已死亡超期的僵尸锁
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: 9999999, token: 'dead_token_for_rename_test', createdAt: Date.now() - 20000 }),
+    'utf8'
+  )
+
+  // 模拟 renameSync 发生系统异常（例如 EBUSY 或挂载锁定）
+  const originalRename = fs.renameSync
+  fs.renameSync = (src, dest) => {
+    if (typeof src === 'string' && src.includes('rename-fail.lock') && !src.includes('.reclaim.lock')) {
+      const err = new Error('EBUSY: resource busy or locked')
+      err.code = 'EBUSY'
+      throw err
+    }
+    return originalRename(src, dest)
+  }
+
+  try {
+    const res = tryReclaimStaleLock(lockDir, 1000)
+    // 核心断言 1：返回值准确反映失败，绝不虚报成功
+    assert.equal(res, false)
+
+    // 核心断言 2：原锁目录完好保留在磁盘上，绝不会被无条件 rmSync 误删！
+    assert.ok(fs.existsSync(lockDir))
+    assert.equal(readLockOwner(lockDir)?.token, 'dead_token_for_rename_test')
+  } finally {
+    fs.renameSync = originalRename
+  }
+
+  // 恢复后正常回收通过
+  const normalRes = tryReclaimStaleLock(lockDir, 1000)
+  assert.equal(normalRes, true)
+  assert.ok(!fs.existsSync(lockDir))
+})
