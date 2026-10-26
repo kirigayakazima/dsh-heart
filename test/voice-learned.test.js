@@ -11,6 +11,7 @@ import {
   safeAtomicReplace,
   acquireDirLock,
   releaseDirLock,
+  tryReclaimStaleLock,
   readLockOwner,
   isDirLockHeld,
   isProcessAlive,
@@ -356,4 +357,82 @@ test('15. readVoiceLearned 容错读取备份文件：在主文件处于 .bak �
 
   const read = readVoiceLearned(root)
   assert.equal(read, bakContent)
+})
+
+test('16. 并发竞争回收僵尸锁安全（消除 TOCTOU 竞态）：新锁绝不被滞后的旧回收者误删', () => {
+  const root = tmp()
+  const lockDir = path.join(root, 'concurrent-reclaim.lock')
+  fs.mkdirSync(lockDir, { recursive: true })
+
+  // 步骤 1: 初始为僵尸锁（持锁者 PID 为已死亡进程 9999999，且时间超期）
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: 9999999, token: 'dead_token_1', createdAt: Date.now() - 15000 }),
+    'utf8'
+  )
+
+  // 步骤 2: 模拟竞争者 B 抢先一步成功回收了僵尸锁，并创建了新锁，写入存活进程的所有权
+  const reclaimedB = tryReclaimStaleLock(lockDir, 1000)
+  assert.equal(reclaimedB, true)
+  assert.ok(!fs.existsSync(lockDir))
+
+  // 竞争者 B 获得新锁，写入存活进程凭据
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: process.pid, token: 'new_alive_token_b', createdAt: Date.now() }),
+    'utf8'
+  )
+
+  // 步骤 3: 滞后的竞争者 A 恢复执行，试图调用 tryReclaimStaleLock 回收
+  // 二次核验协议必须生效：识别出当前持锁者 process.pid 存活，必须拒绝回收！
+  const reclaimedA = tryReclaimStaleLock(lockDir, 1000)
+  assert.equal(reclaimedA, false)
+
+  // 核心断言：竞争者 B 的新锁及凭据完好无损，绝对没有被 A 的滞后操作误删！
+  assert.ok(fs.existsSync(lockDir))
+  assert.equal(readLockOwner(lockDir)?.token, 'new_alive_token_b')
+
+  // 步骤 4: 模拟回收锁并发互斥：当 reclaim.lock 被占用时，其他回收者直接被拒
+  const reclaimLock = `${lockDir}.reclaim.lock`
+  fs.mkdirSync(reclaimLock, { recursive: true })
+  const reclaimedConcurrent = tryReclaimStaleLock(lockDir, 10000)
+  assert.equal(reclaimedConcurrent, false)
+  fs.rmSync(reclaimLock, { recursive: true, force: true })
+})
+
+test('17. 多进程多 PID 备份文件按时间戳准确选择最新版本（不依赖 PID 字典序）', () => {
+  const root = tmp()
+  const bodyDir = path.join(root, 'body')
+  fs.mkdirSync(bodyDir, { recursive: true })
+
+  // 构造两个备份文件：
+  // 备份 A: 时间较旧 (T = 1700000000000)，但 PID 很大 (99999)
+  // 备份 B: 时间较新 (T = 1700000050000)，但 PID 较小 (100)
+  // 若按 PID 倒序排序，会错误选中 A；按时间戳解析排序，必须正确选中 B！
+  const oldBak = path.join(bodyDir, 'voice-learned.md.bak.1700000000000.99999.rand1')
+  const newBak = path.join(bodyDir, 'voice-learned.md.bak.1700000050000.100.rand2')
+
+  fs.writeFileSync(oldBak, '- 2026-10-26 旧备份内容（时间早但 PID 大）\n', 'utf8')
+  fs.writeFileSync(newBak, '- 2026-10-26 最新备份内容（时间晚但 PID 小）\n', 'utf8')
+
+  const content = readVoiceLearned(root)
+  assert.ok(content.includes('最新备份内容'))
+  assert.ok(!content.includes('旧备份内容'))
+})
+
+test('18. owner.json 写入短暂窗口安全：创建中途的新锁不被误判为损坏锁', () => {
+  const root = tmp()
+  const lockDir = path.join(root, 'transient-window.lock')
+
+  // 模拟刚完成 mkdirSync 但 owner.json 尚在写入中的微秒级窗口（年龄约为 0ms）
+  fs.mkdirSync(lockDir, { recursive: true })
+  assert.equal(readLockOwner(lockDir), null)
+
+  // 尝试获取锁，设置短等待
+  const res = acquireDirLock(lockDir, { retries: 2, delayMs: 10, staleMs: 1000 })
+  assert.equal(res, null)
+
+  // 核心断言：由于 lockDir 年龄未超过 staleMs，绝不被误判为损坏锁，目录完整保留
+  assert.ok(fs.existsSync(lockDir))
 })
