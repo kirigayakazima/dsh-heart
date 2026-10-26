@@ -3,9 +3,12 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import {
   readVoiceLearned,
   appendVoiceLearned,
+  safeAtomicReplace,
   VOICE_LEARNED_MAX_LENGTH,
   VOICE_LEARNED_MAX_ENTRIES,
 } from '../lib/store.js'
@@ -128,12 +131,12 @@ test('7. 读取或写入异常时能够捕获错误并返回明确失败，绝�
   assert.equal(resRead.reason, 'read-error')
   assert.ok(typeof resRead.message === 'string')
 
-  // 场景 B: 目标路径所在的上级目录不可写（例如把 root 变成一个只读文件），捕获 write-error
+  // 场景 B: 目标路径所在的上级目录不可写，捕获 write-error
   const fakeFileRoot = path.join(tmp(), 'not-a-dir')
   fs.writeFileSync(fakeFileRoot, 'hello')
   const resWrite = appendVoiceLearned(fakeFileRoot, '写入测试')
   assert.equal(resWrite.ok, false)
-  assert.ok(resWrite.reason === 'write-error' || resWrite.reason === 'read-error')
+  assert.equal(resWrite.reason, 'write-error')
   assert.ok(typeof resWrite.message === 'string')
 })
 
@@ -179,17 +182,68 @@ test('9. 提示词防注入清洗：净化 Markdown 标题符号与 XML/HTML 标
   assert.ok(res.entry.includes('喜欢看简短总结'))
 })
 
-test('10. 并发写入安全性：连续并行调用不发生临时文件名冲突', async () => {
+test('10. 安全文件替换：当替换失败时，旧文件副本必须完整保留，绝不丢失', () => {
   const root = tmp()
-  const count = 10
-  // 同时触发 count 次异步写入操作
-  const tasks = Array.from({ length: count }, (_, i) => {
-    return Promise.resolve().then(() => appendVoiceLearned(root, `并发安全记录_${i + 1}`))
+  const target = path.join(root, 'target.md')
+  const tmpFile = path.join(root, 'tmp.md')
+  const initialContent = '- 2026-10-26 珍贵的历史旧记录，绝对不能丢\n'
+
+  fs.writeFileSync(target, initialContent, 'utf8')
+  fs.writeFileSync(tmpFile, '- 2026-10-26 尝试替换的新内容\n', 'utf8')
+
+  // 构造替换异常：将临时文件删掉，使得 renameSync(tmpFile, target) 必然失败
+  fs.unlinkSync(tmpFile)
+
+  assert.throws(() => {
+    safeAtomicReplace(tmpFile, target)
   })
-  const results = await Promise.all(tasks)
-  for (const r of results) {
-    assert.equal(r.ok, true)
+
+  // 核心断言：目标旧文件依然完整存在，内容完好无损！
+  assert.ok(fs.existsSync(target))
+  assert.equal(fs.readFileSync(target, 'utf8'), initialContent)
+})
+
+test('11. 跨进程并发写入安全：两个独立 Node 子进程同时写入同一文件，两条记录均完整保留', async () => {
+  const root = tmp()
+  const storeModuleUrl = pathToFileURL(path.resolve(import.meta.dirname, '../lib/store.js')).href
+
+  const runSubprocess = (entryText) => {
+    return new Promise((resolve, reject) => {
+      const script = `
+        import('${storeModuleUrl}').then((m) => {
+          const res = m.appendVoiceLearned(process.argv[1], process.argv[2]);
+          if (!res.ok) process.exit(1);
+          process.exit(0);
+        }).catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+      `
+      const child = spawn(process.execPath, [
+        '--input-type=module',
+        '-e',
+        script,
+        root,
+        entryText,
+      ])
+      let stderr = ''
+      child.stderr.on('data', (d) => { stderr += d })
+      child.on('close', (code) => {
+        if (code === 0) resolve()
+        else reject(new Error(`Subprocess exited with code ${code}: ${stderr}`))
+      })
+    })
   }
-  const lines = readVoiceLearned(root).split('\n').filter((l) => l.trim().startsWith('- '))
-  assert.equal(lines.length, count)
+
+  // 同时启动两个独立的 Node.js 子进程向同一 root 并发写入两条不同记录
+  await Promise.all([
+    runSubprocess('进程 A 写入的独立偏好记录'),
+    runSubprocess('进程 B 写入的独立偏好记录'),
+  ])
+
+  const content = readVoiceLearned(root)
+  assert.ok(content.includes('进程 A 写入的独立偏好记录'))
+  assert.ok(content.includes('进程 B 写入的独立偏好记录'))
+  const lines = content.split('\n').filter((l) => l.trim().startsWith('- '))
+  assert.equal(lines.length, 2)
 })
