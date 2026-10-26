@@ -9,6 +9,11 @@ import {
   readVoiceLearned,
   appendVoiceLearned,
   safeAtomicReplace,
+  acquireDirLock,
+  releaseDirLock,
+  readLockOwner,
+  isDirLockHeld,
+  isProcessAlive,
   VOICE_LEARNED_MAX_LENGTH,
   VOICE_LEARNED_MAX_ENTRIES,
 } from '../lib/store.js'
@@ -246,4 +251,109 @@ test('11. 跨进程并发写入安全：两个独立 Node 子进程同时写入�
   assert.ok(content.includes('进程 B 写入的独立偏好记录'))
   const lines = content.split('\n').filter((l) => l.trim().startsWith('- '))
   assert.equal(lines.length, 2)
+})
+
+test('12. 锁所有者验证：持有不同 token 的旧进程恢复后尝试释放锁，必须被拒绝且不删除锁目录', () => {
+  const root = tmp()
+  const lockDir = path.join(root, 'test.lock')
+
+  // 进程 A 获取锁，得到 tokenA
+  const tokenA = acquireDirLock(lockDir)
+  assert.ok(tokenA)
+  assert.ok(isDirLockHeld(lockDir, tokenA))
+
+  // 模拟锁所有权更替：例如发生回收后由进程 B 占有锁
+  const tokenB = 'simulated_process_b_token_xyz'
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: process.pid, token: tokenB, createdAt: Date.now() }),
+    'utf8'
+  )
+
+  // 进程 A 恢复执行并尝试 releaseDirLock(lockDir, tokenA)
+  const released = releaseDirLock(lockDir, tokenA)
+  // 断言释放被拒绝，返回 false
+  assert.equal(released, false)
+
+  // 核心断言：锁目录和 B 的 owner.json 依然完整保留，绝不误删 B 的锁！
+  assert.ok(fs.existsSync(lockDir))
+  assert.equal(readLockOwner(lockDir)?.token, tokenB)
+
+  // 进程 B 使用正确的 token 释放
+  const releasedB = releaseDirLock(lockDir, tokenB)
+  assert.equal(releasedB, true)
+  assert.ok(!fs.existsSync(lockDir))
+})
+
+test('13. 僵尸锁回收：持锁进程已死且锁过期时自动回收；持锁进程仍存活时绝不强行抢占', () => {
+  const root = tmp()
+  const lockDir = path.join(root, 'test-stale.lock')
+  fs.mkdirSync(lockDir, { recursive: true })
+
+  // 场景 A: 持锁者进程存活 (process.pid)，即使锁时间很旧，也绝不被抢占
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: process.pid, token: 'alive_owner', createdAt: Date.now() - 60000 }),
+    'utf8'
+  )
+  assert.equal(isProcessAlive(process.pid), true)
+  const acquireWhileAlive = acquireDirLock(lockDir, { retries: 2, delayMs: 10, staleMs: 100 })
+  // 必须争锁失败，绝不抢占活着的进程的锁
+  assert.equal(acquireWhileAlive, null)
+  assert.ok(fs.existsSync(lockDir))
+
+  // 场景 B: 持锁者进程已死 (不存在的 PID 9999999) 且锁超过缓冲期
+  const deadPid = 9999999
+  assert.equal(isProcessAlive(deadPid), false)
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: deadPid, token: 'dead_owner', createdAt: Date.now() - 15000 }),
+    'utf8'
+  )
+
+  const newToken = acquireDirLock(lockDir, { retries: 5, delayMs: 10, staleMs: 1000 })
+  // 必须成功自愈并抢得新锁
+  assert.ok(newToken)
+  assert.equal(readLockOwner(lockDir)?.token, newToken)
+
+  releaseDirLock(lockDir, newToken)
+  assert.ok(!fs.existsSync(lockDir))
+})
+
+test('14. 写盘持锁有效性校验（Fencing）：写入过程中若锁丢失，拒绝安全替换并中止写入', () => {
+  const root = tmp()
+  const bodyDir = path.join(root, 'body')
+  fs.mkdirSync(bodyDir, { recursive: true })
+  const lockDir = path.join(bodyDir, 'voice-learned.md.lock')
+
+  // 先在锁目录中写入伪造的第三方持有者 token
+  fs.mkdirSync(lockDir, { recursive: true })
+  fs.writeFileSync(
+    path.join(lockDir, 'owner.json'),
+    JSON.stringify({ pid: process.pid, token: 'third_party_owner', createdAt: Date.now() }),
+    'utf8'
+  )
+
+  // 尝试争锁，因为锁被存活进程持有，直接超时
+  const res = appendVoiceLearned(root, '测试 Fencing')
+  assert.equal(res.ok, false)
+  assert.equal(res.reason, 'lock-timeout')
+
+  // 确保原锁目录和第三方 owner 未被破坏
+  assert.ok(fs.existsSync(lockDir))
+  assert.equal(readLockOwner(lockDir)?.token, 'third_party_owner')
+})
+
+test('15. readVoiceLearned 容错读取备份文件：在主文件处于 .bak 毫秒级窗口时，仍能读出备份内容', () => {
+  const root = tmp()
+  const bodyDir = path.join(root, 'body')
+  fs.mkdirSync(bodyDir, { recursive: true })
+
+  // 模拟主文件暂未就位，但存在合法的备份文件
+  const bakFile = path.join(bodyDir, 'voice-learned.md.bak.1234.9999')
+  const bakContent = '- 2026-10-26 备份中包含的有效表达偏好\n'
+  fs.writeFileSync(bakFile, bakContent, 'utf8')
+
+  const read = readVoiceLearned(root)
+  assert.equal(read, bakContent)
 })
