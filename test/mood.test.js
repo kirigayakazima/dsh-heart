@@ -373,11 +373,13 @@ test('12. buildMoodSection 集成与降级测试', () => {
   // 1. 默认无文件时，返回空串（零侵入）
   assert.equal(buildMoodSection(root), '')
 
-  // 2. 正常更新后，注入预定义段落
+  // 2. 正常更新后，注入预定义段落与完整三维背景
   updateMood(root, { state: 'engaged', intensity: 0.65, reason: 'focus' })
   const section = buildMoodSection(root)
   assert.ok(section.includes('当前倾向：投入、专注。'))
   assert.ok(section.includes('清晰、积极推进，保持专注节奏。'))
+  assert.ok(section.includes('连续底噪参考：'))
+  assert.ok(section.includes('状态背景：近期进入深度专注攻坚。'))
 
   // 3. 损坏文件时，优雅降级返回空串，绝不抛出异常破坏上下文装配
   const file = path.join(root, 'body', MOOD_FILE)
