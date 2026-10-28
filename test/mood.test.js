@@ -25,6 +25,13 @@ import {
   MOOD_FILE,
   acquireDirLock,
   releaseDirLock,
+  BASELINE,
+  HALF_LIFE_MS,
+  decayDimension,
+  calculateDistanceToBaseline,
+  deriveDominantState,
+  mapStateTo3DImpulse,
+  format3DMoodPrompt,
 } from '../lib/store.js'
 import { buildMoodSection } from '../lib/prompt.js'
 
@@ -586,3 +593,155 @@ test('16. 持久化记录超界强度或非法时间戳：readMood 与 getEffect
   assert.equal(getEffectiveMood({ schemaVersion: 1, state: 'cheerful', intensity: 0.8, reason: 'task_completed', updatedAt: 'not-a-date' }).state, 'calm')
   assert.equal(getEffectiveMood({ schemaVersion: 1, state: 'cheerful', intensity: 0.8, reason: 'task_completed' }).state, 'calm')
 })
+
+// ---------------------------------------------------------------- 7. Mood 2.0 连续内生状态与冲量合成验证
+test('17. Mood 2.0 三维连续向非零基线平滑衰减精度与时钟倒退防御（12h / 4h / 24h 半衰期）', () => {
+  // 基线：valence = 0.2, arousal = 0.3, energy = 0.6
+  assert.equal(BASELINE.valence, 0.2)
+  assert.equal(BASELINE.arousal, 0.3)
+  assert.equal(BASELINE.energy, 0.6)
+
+  // 1. valence 衰减：半衰期 12h，从 0.8 衰减 12h 后应为 0.2 + (0.8 - 0.2) * 0.5 = 0.5
+  const v12h = decayDimension(0.8, BASELINE.valence, 12 * 3600 * 1000, HALF_LIFE_MS.valence)
+  assert.ok(Math.abs(v12h - 0.5) < 1e-6)
+
+  // 2. arousal 衰减：半衰期 4h，从 0.7 衰减 4h 后应为 0.3 + (0.7 - 0.3) * 0.5 = 0.5
+  const a4h = decayDimension(0.7, BASELINE.arousal, 4 * 3600 * 1000, HALF_LIFE_MS.arousal)
+  assert.ok(Math.abs(a4h - 0.5) < 1e-6)
+
+  // 3. energy 衰减：半衰期 24h，从 0.2（疲惫）衰减 24h 后应向基线 0.6 回升至 0.6 + (0.2 - 0.6) * 0.5 = 0.4
+  const e24h = decayDimension(0.2, BASELINE.energy, 24 * 3600 * 1000, HALF_LIFE_MS.energy)
+  assert.ok(Math.abs(e24h - 0.4) < 1e-6)
+
+  // 4. 经过充分长时间（72h 后），三维状态几乎完全回归非零基线
+  const v72h = decayDimension(0.8, BASELINE.valence, 72 * 3600 * 1000, HALF_LIFE_MS.valence)
+  const a72h = decayDimension(0.7, BASELINE.arousal, 72 * 3600 * 1000, HALF_LIFE_MS.arousal)
+  const e72h = decayDimension(0.2, BASELINE.energy, 72 * 3600 * 1000, HALF_LIFE_MS.energy)
+  assert.ok(Math.abs(v72h - BASELINE.valence) < 0.02)
+  assert.ok(Math.abs(a72h - BASELINE.arousal) < 0.01)
+  assert.ok(Math.abs(e72h - BASELINE.energy) < 0.06)
+
+  // 5. 时钟倒退防御：elapsedMs < 0 时强制按当前值返回，绝不倒流放大
+  const vNegative = decayDimension(0.8, BASELINE.valence, -3600 * 1000, HALF_LIFE_MS.valence)
+  assert.equal(vNegative, 0.8)
+})
+
+test('18. Mood 2.0 冲量合成：新事件在衰减后的有效状态上叠加，不丢失前序未衰减历史', () => {
+  const root = tmp()
+  const t0 = new Date('2026-10-26T10:00:00.000Z')
+
+  // 事件 1: focus 产生 engaged 状态（提升 arousal）
+  const res1 = updateMood(root, { state: 'engaged', intensity: 0.6, reason: 'focus' }, t0)
+  assert.equal(res1.ok, true)
+  assert.ok(res1.mood.arousal > BASELINE.arousal)
+  const a1 = res1.mood.arousal
+
+  // 经过 2 小时（arousal 半衰期为 4 小时，此时尚未完全回归基线）
+  const t1 = new Date(t0.getTime() + 2 * 3600 * 1000)
+  const eff1 = readMood(root, t1)
+  assert.ok(eff1.arousal > BASELINE.arousal)
+  assert.ok(eff1.arousal < a1)
+
+  // 事件 2: 此时完成了任务，触发 cheerful（主要提升 valence）
+  const res2 = updateMood(root, { state: 'cheerful', intensity: 0.7, reason: 'task_completed' }, t1)
+  assert.equal(res2.ok, true)
+
+  // 核心断言：事件 2 的状态是叠加在 eff1 之上的，arousal 依然保留了事件 1 未衰减完的唤醒余热！
+  assert.ok(res2.mood.valence > BASELINE.valence)
+  assert.ok(res2.mood.arousal > BASELINE.arousal)
+})
+
+test('19. Mood 2.0 欧氏距离与 why 显隐：偏离基线显著时保留 why，收敛至底噪时淡化为日常基准', () => {
+  const t0 = new Date('2026-10-26T12:00:00.000Z')
+  const root = tmp()
+
+  // 1. 产生显著事件
+  updateMood(root, { state: 'excited', intensity: 0.8, reason: 'task_completed' }, t0)
+  const effActive = readMood(root, t0)
+  const distActive = calculateDistanceToBaseline(effActive.valence, effActive.arousal, effActive.energy)
+  assert.ok(distActive > LOW_INTENSITY_THRESHOLD)
+  assert.equal(effActive.why, '完成了一项有意义的任务')
+
+  // 2. 经过 48 小时，状态已深度衰减收敛至基线附近
+  const tLate = new Date(t0.getTime() + 48 * 3600 * 1000)
+  const effLate = readMood(root, tLate)
+  const distLate = calculateDistanceToBaseline(effLate.valence, effLate.arousal, effLate.energy)
+  assert.ok(distLate <= LOW_INTENSITY_THRESHOLD)
+  // 核心断言：why 已弱化为日常基准状态，不反复强化陈旧历史事件
+  assert.equal(effLate.why, '日常基准状态')
+})
+
+test('20. Mood 2.0 旧版数据透明升级：纯 v1 记录读取时平滑转换为 3D 状态', () => {
+  const root = tmp()
+  const bodyDir = path.join(root, 'body')
+  fs.mkdirSync(bodyDir, { recursive: true })
+  const file = path.join(bodyDir, MOOD_FILE)
+
+  // 模拟只有旧版 v1 字段的记录文件
+  const legacyRecord = {
+    schemaVersion: 1,
+    state: 'cheerful',
+    intensity: 0.7,
+    reason: 'positive_interaction',
+    updatedAt: new Date().toISOString(),
+  }
+  fs.writeFileSync(file, JSON.stringify(legacyRecord, null, 2), 'utf8')
+
+  // 调用 readMood 读取
+  const eff = readMood(root)
+  // 既有兼容字段
+  assert.equal(eff.state, 'cheerful')
+  assert.equal(eff.intensity, 0.7)
+  // 自动生成的 3D 属性
+  assert.ok(typeof eff.valence === 'number')
+  assert.ok(eff.valence > BASELINE.valence)
+  assert.ok(typeof eff.arousal === 'number')
+  assert.ok(typeof eff.energy === 'number')
+  assert.equal(eff.why, '与用户有了积极愉快的互动')
+})
+
+test('21. Mood 2.0 format3DMoodPrompt 弱约束提示词：底噪静默、自然语言映射、无数值泄露、精力不作为拒单理由', () => {
+  // 1. 基线底噪时返回空串，不消耗日常 token
+  const baselineMood = {
+    valence: BASELINE.valence,
+    arousal: BASELINE.arousal,
+    energy: BASELINE.energy,
+    why: '日常基准状态',
+  }
+  assert.equal(format3DMoodPrompt(baselineMood), '')
+
+  // 2. 偏离基线时输出弱约束指引
+  const activeMood = {
+    valence: 0.65,
+    arousal: 0.6,
+    energy: 0.8,
+    why: '攻克了复杂技术难题',
+  }
+  const prompt = format3DMoodPrompt(activeMood)
+  assert.ok(prompt.includes('### 当前内部状态（短期表达倾向参考）'))
+  assert.ok(prompt.includes('略偏愉悦舒畅'))
+  assert.ok(prompt.includes('较为活跃敏锐'))
+  assert.ok(prompt.includes('精力充沛'))
+  assert.ok(prompt.includes('近期攻克了复杂技术难题'))
+  assert.ok(prompt.includes('精力状态绝不作为拒绝任务的理由'))
+
+  // 严禁泄露原始数值
+  assert.equal(prompt.includes('0.65'), false)
+  assert.equal(prompt.includes('0.6'), false)
+  assert.equal(prompt.includes('0.8'), false)
+})
+
+test('22. Mood 2.0 resetMood 重置后立即平复回中性基线', () => {
+  const root = tmp()
+  updateMood(root, { state: 'excited', intensity: 0.85, reason: 'task_completed' })
+
+  // 重置
+  const rReset = resetMood(root)
+  assert.equal(rReset.ok, true)
+  assert.equal(rReset.mood.valence, BASELINE.valence)
+  assert.equal(rReset.mood.arousal, BASELINE.arousal)
+  assert.equal(rReset.mood.energy, BASELINE.energy)
+  assert.equal(rReset.mood.state, 'calm')
+  assert.equal(rReset.mood.intensity, 0.0)
+})
+
