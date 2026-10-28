@@ -14,6 +14,8 @@ import {
   saveInsights,
   updateInsightStatus,
   applyInsightTransition,
+  promoteInsight,
+  resolvePromotionTarget,
   DREAM_DIR,
   INSIGHTS_FILE,
   INSIGHTS_LOCK,
@@ -24,6 +26,10 @@ import {
   appendFact,
   appendNotebook,
   appendVoiceLearned,
+  readFacts,
+  readNotebook,
+  readVoiceLearned,
+  readModuleLogs,
 } from '../lib/store.js'
 
 function tmp() {
@@ -491,4 +497,243 @@ test('12. heart_dream 工具执行层集成：reflect、list、show、confirm、
   const listConfirmed = await executeDreamTool({ action: 'list', status: 'confirmed' })
   assert.ok(listConfirmed.message.includes('共找到 1 条经验（状态: confirmed）'))
 })
+
+// ---------------------------------------------------------------- 九、经验向长期记忆受控晋升（Step 3C 闭环）
+test('13. resolvePromotionTarget：经验类型与业务分类到长期记忆目标的映射规则', () => {
+  // 1. 表达/沟通习惯 -> body/voice-learned.md
+  const voiceTarget = resolvePromotionTarget({ category: 'communication', type: 'observation', statement: 'xxx' })
+  assert.equal(voiceTarget.ok, true)
+  assert.equal(voiceTarget.target, 'voice')
+  assert.equal(voiceTarget.file, 'body/voice-learned.md')
+
+  // 2. 稳定客观事实 -> facts.md
+  const factTarget = resolvePromotionTarget({ category: 'general', type: 'fact', statement: 'xxx' })
+  assert.equal(factTarget.ok, true)
+  assert.equal(factTarget.target, 'facts')
+  assert.equal(factTarget.file, 'facts.md')
+
+  // 3. 工作流与操作准则 -> notebook.md
+  const noteTarget1 = resolvePromotionTarget({ category: 'workflow', type: 'observation', statement: 'xxx' })
+  assert.equal(noteTarget1.ok, true)
+  assert.equal(noteTarget1.target, 'notebook')
+  assert.equal(noteTarget1.file, 'notebook.md')
+
+  const noteTarget2 = resolvePromotionTarget({ category: 'environment', type: 'inference', statement: 'xxx' })
+  assert.equal(noteTarget2.ok, true)
+  assert.equal(noteTarget2.target, 'notebook')
+  assert.equal(noteTarget2.file, 'notebook.md')
+
+  // 4. 假设型认知（hypothesis）防御：未经充分验证，拦截晋升！
+  const hypothesisTarget = resolvePromotionTarget({ category: 'workflow', type: 'hypothesis', statement: 'xxx' })
+  assert.equal(hypothesisTarget.ok, false)
+  assert.equal(hypothesisTarget.reason, 'unverified-hypothesis')
+})
+
+test('14. promoteInsight 预览阶段（commit: false）：只读回显，不改动任何记忆或经验文件', () => {
+  const root = tmp()
+
+  // 存入一条已确认经验
+  saveInsights(root, [{ category: 'workflow', type: 'observation', statement: '每次修改后运行全量测试' }])
+  const items = readInsights(root).items
+  const target = items[0]
+  updateInsightStatus(root, target.id, 'confirm')
+
+  // 记录文件快照
+  const factsBefore = readFacts(root)
+  const notebookBefore = readNotebook(root)
+  const voiceBefore = readVoiceLearned(root)
+
+  // 默认 preview (commit: false)
+  const previewRes = promoteInsight(root, target.id, { commit: false })
+  assert.equal(previewRes.ok, true)
+  assert.equal(previewRes.isPreview, true)
+  assert.ok(previewRes.message.includes('【经验晋升预览】'))
+  assert.ok(previewRes.message.includes('notebook.md'))
+  assert.ok(previewRes.message.includes('commit=true'))
+
+  // 核心断言：预览阶段磁盘长期记忆与状态文件必须 100% 毫无变动
+  assert.equal(readFacts(root), factsBefore)
+  assert.equal(readNotebook(root), notebookBefore)
+  assert.equal(readVoiceLearned(root), voiceBefore)
+  assert.equal(readInsights(root).items[0].status, 'confirmed')
+})
+
+test('15. promoteInsight 审核资格拦截：未确认的 candidate 或已驳回的 rejected 经验坚决拒绝晋升', () => {
+  const root = tmp()
+
+  saveInsights(root, [
+    { category: 'workflow', type: 'observation', statement: '条目 1 - 待审' },
+    { category: 'communication', type: 'observation', statement: '条目 2 - 驳回' },
+  ])
+
+  const items = readInsights(root).items
+  const candidateItem = items.find((it) => it.statement.includes('条目 1'))
+  const rejectedItem = items.find((it) => it.statement.includes('条目 2'))
+  updateInsightStatus(root, rejectedItem.id, 'reject', { reason: '不符合事实' })
+
+  // 1. candidate 尝试晋升 -> 拦截
+  const resCandidate = promoteInsight(root, candidateItem.id, { commit: true })
+  assert.equal(resCandidate.ok, false)
+  assert.equal(resCandidate.reason, 'unconfirmed-not-promotable')
+
+  // 2. rejected 尝试晋升 -> 拦截
+  const resRejected = promoteInsight(root, rejectedItem.id, { commit: true })
+  assert.equal(resRejected.ok, false)
+  assert.equal(resRejected.reason, 'rejected-not-promotable')
+})
+
+test('16. promoteInsight 显式提交（commit: true）：长期记忆准确写入、状态推进至 promoted、记录晋升时间与目标', () => {
+  const root = tmp()
+
+  // 存入 3 种不同分类的经验并全部人工确认
+  saveInsights(root, [
+    { category: 'communication', type: 'observation', statement: '习惯用简练语言' },
+    { category: 'general', type: 'fact', statement: '操作系统是 Windows 11' },
+    { category: 'workflow', type: 'observation', statement: '按模块连续实施' },
+  ])
+
+  const currentItems = readInsights(root).items
+  for (const it of currentItems) {
+    updateInsightStatus(root, it.id, 'confirm')
+  }
+
+  // 1. 晋升 communication -> voice-learned.md
+  const voiceItem = currentItems.find((it) => it.category === 'communication')
+  const rVoice = promoteInsight(root, voiceItem.id, { commit: true })
+  assert.equal(rVoice.ok, true)
+  assert.equal(rVoice.committed, true)
+  assert.ok(readVoiceLearned(root).includes('习惯用简练语言'))
+
+  // 2. 晋升 fact -> facts.md
+  const factItem = currentItems.find((it) => it.type === 'fact')
+  const rFact = promoteInsight(root, factItem.id, { commit: true })
+  assert.equal(rFact.ok, true)
+  assert.ok(readFacts(root).includes('操作系统是 Windows 11'))
+
+  // 3. 晋升 workflow -> notebook.md
+  const noteItem = currentItems.find((it) => it.category === 'workflow')
+  const rNote = promoteInsight(root, noteItem.id, { commit: true })
+  assert.equal(rNote.ok, true)
+  assert.ok(readNotebook(root).includes('按模块连续实施'))
+
+  // 检查状态均已流转为 promoted 并记录了归宿与时间戳
+  const itemsAfter = readInsights(root).items
+  for (const it of itemsAfter) {
+    assert.equal(it.status, 'promoted')
+    assert.ok(it.promotedAt)
+    assert.ok(it.promotedTo)
+  }
+})
+
+test('17. promoteInsight 幂等防重：重复提交安全成功，绝不在记忆文件中生成重复行', () => {
+  const root = tmp()
+
+  saveInsights(root, [{ category: 'workflow', type: 'observation', statement: '不可生成重复记忆行' }])
+  const targetId = readInsights(root).items[0].id
+  updateInsightStatus(root, targetId, 'confirm')
+
+  // 首次提交
+  const res1 = promoteInsight(root, targetId, { commit: true })
+  assert.equal(res1.ok, true)
+  assert.equal(res1.committed, true)
+
+  const notebookAfterFirst = readNotebook(root)
+  const matchesFirst = notebookAfterFirst.split('\n').filter((l) => l.includes('不可生成重复记忆行'))
+  assert.equal(matchesFirst.length, 1)
+
+  // 第二次重复提交（已处于 promoted 状态）
+  const res2 = promoteInsight(root, targetId, { commit: true })
+  assert.equal(res2.ok, true)
+  assert.equal(res2.alreadyPromoted, true)
+
+  // 核心断言：notebook.md 中该行依然只有 1 条，绝无重复行
+  const notebookAfterSecond = readNotebook(root)
+  const matchesSecond = notebookAfterSecond.split('\n').filter((l) => l.includes('不可生成重复记忆行'))
+  assert.equal(matchesSecond.length, 1)
+})
+
+test('18. promoteInsight 故障恢复与重试安全：模拟记忆已写入但状态未更新的异常中途故障，重试时安全完成状态推进且不二次追加', () => {
+  const root = tmp()
+
+  const stmt = '模拟中途断电故障测试'
+  saveInsights(root, [{ category: 'workflow', type: 'observation', statement: stmt }])
+  const targetId = readInsights(root).items[0].id
+  updateInsightStatus(root, targetId, 'confirm')
+
+  // 模拟中途故障路径：长期记忆文件 notebook.md 已写入，但 insights.json 更新前进程中断退出
+  appendNotebook(root, stmt)
+  assert.ok(readNotebook(root).includes(stmt))
+  // 此时 insights.json 中的状态依然停留在 confirmed
+  assert.equal(readInsights(root).items[0].status, 'confirmed')
+
+  // 用户发起重试
+  const retryRes = promoteInsight(root, targetId, { commit: true })
+  assert.equal(retryRes.ok, true)
+  assert.equal(retryRes.committed, true)
+
+  // 核心断言 1：状态成功自愈推进为 promoted
+  assert.equal(readInsights(root).items[0].status, 'promoted')
+
+  // 核心断言 2：长期记忆 notebook.md 中依然严格只有 1 条，重试未发生二次追加！
+  const matches = readNotebook(root).split('\n').filter((l) => l.includes(stmt))
+  assert.equal(matches.length, 1)
+})
+
+test('19. heart_dream 工具执行层集成 action="promote"：包含预览与显式提交完整流程', async () => {
+  const root = tmp()
+
+  const executeDreamTool = async (args) => {
+    const action = String((args && args.action) || 'reflect').trim().toLowerCase()
+    if (action === 'promote') {
+      const id = String((args && args.id) || '').trim()
+      if (!id) return { message: '请提供要晋升的经验条目 ID' }
+      const commit = Boolean(args && args.commit)
+      const res = promoteInsight(root, id, { commit })
+      return { message: res.message }
+    }
+    return { message: 'other action' }
+  }
+
+  saveInsights(root, [{ category: 'general', type: 'fact', statement: '项目使用 Node 原生测试套件' }])
+  const targetId = readInsights(root).items[0].id
+  updateInsightStatus(root, targetId, 'confirm')
+
+  // 1. 默认预览
+  const previewMsg = await executeDreamTool({ action: 'promote', id: targetId.slice(0, 8) })
+  assert.ok(previewMsg.message.includes('【经验晋升预览】'))
+  assert.ok(previewMsg.message.includes('facts.md'))
+  assert.ok(previewMsg.message.includes('commit=true'))
+  assert.equal(readFacts(root).includes('项目使用 Node 原生测试套件'), false)
+
+  // 2. 显式提交
+  const commitMsg = await executeDreamTool({ action: 'promote', id: targetId.slice(0, 8), commit: true })
+  assert.ok(commitMsg.message.includes('已成功将经验'))
+  assert.ok(commitMsg.message.includes('事实记忆（facts.md）'))
+  assert.equal(readFacts(root).includes('项目使用 Node 原生测试套件'), true)
+})
+
+test('20. Dream 经验生命周期与分区日志审计：验证 reflect、save、confirm、promote 全程在 dream.log 与 memory.log 中留下结构化追踪', () => {
+  const root = tmp()
+
+  // 1. saveInsights -> 记录 dream.log
+  saveInsights(root, [{ category: 'communication', type: 'observation', statement: '偏好代码直接落地' }])
+  const targetId = readInsights(root).items[0].id
+
+  const dreamLogs1 = readModuleLogs(root, 'dream')
+  assert.ok(dreamLogs1.some((l) => l.action === 'save_insights_success'))
+
+  // 2. updateInsightStatus confirm -> 记录 dream.log
+  updateInsightStatus(root, targetId, 'confirm')
+  const dreamLogs2 = readModuleLogs(root, 'dream')
+  assert.ok(dreamLogs2.some((l) => l.action === 'insight_confirm_success'))
+
+  // 3. promoteInsight -> 记录 dream.log 与 memory.log
+  promoteInsight(root, targetId, { commit: true })
+  const dreamLogs3 = readModuleLogs(root, 'dream')
+  assert.ok(dreamLogs3.some((l) => l.action === 'promote_commit_success'))
+
+  const memoryLogs = readModuleLogs(root, 'memory')
+  assert.ok(memoryLogs.some((l) => l.action === 'append_voice_learned'))
+})
+
 
