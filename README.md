@@ -6,6 +6,26 @@
 - **心**不是我们写的：只有它自己能往里写。插件只提供写入面。
 - **心是本地的**：不跨实例、不跨设备，没有"留给下一个自己"这种机制。
 
+## 记忆职责模式（0.19.0）
+
+默认 `legacy`，升级不改变原有记忆行为。若已在隔离环境验证 Mnemon，可手动切换到 `external`：
+
+```powershell
+$env:HEART_ROOT = '你的 Heart 数据根目录'
+node bin/heart.js mode external
+# 回退：node bin/heart.js mode legacy
+```
+
+唯一配置来源是该数据根的 `config.json` 中的 `memoryMode`，不是 profile 的同名字段。切换后重载宿主更新工具说明；存储检查立即生效。配置损坏或未知模式值会保守停写普通记忆；CLI 拒绝非法值。
+
+`external` 保留 Mood、Voice、Notebook 自我原则、Body、Sense、Trigger；拒绝 facts/MEMORY 的新增、修订和删除，关闭旧 facts 自动注入。旧文件不迁移、不删改，启动时也不补来源或升级旧档案。`heart_recall` 标明旧 Heart 档案来源，`heart_self(includeLegacy=true)` 才附带旧 facts/MEMORY；默认只读 Notebook。
+
+Dream 禁止 `type=fact` 晋升（即使 category=communication）。沟通观察可晋升 Voice；Notebook 晋升必须经确认，并显式传 `selfPrinciple=true` 声明为自我原则。此声明不是正文语义分类器，不能用 Notebook 保存普通用户事实。
+
+external 下整包导入被拒绝（包括 force），避免导入配置重新开放写权限；导出仍可备份，但不能把输出指向受保护的事实、MEMORY 或配置。新用户事实直接使用 Mnemon 官方工具；Heart 不调用 Mnemon 私有 Provider/CLI，也不实现检索适配器。
+
+生产切换前应先备份并验收实际 profile，停止宿主后设置模式，再启动检查。回退无需重建或删除 Mnemon 数据；回到 legacy 同时停用 Mnemon 写入来源，避免两边同时写。当前开发不自动启用生产 external。
+
 ## 为什么这样分
 
 大多数「人格」方案失败，是因为把两件事当成了一件：

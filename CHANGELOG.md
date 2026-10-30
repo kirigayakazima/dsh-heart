@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.19.0] - 2026-10-30
+
+- 新增 root/config.json 的 legacy/external 记忆职责模式；默认 legacy。
+- external 在存储层保护旧 facts/MEMORY，阻止 write/revise/discard、CLI、整包导入和导出覆盖等旁路；跳过旧档案迁移。
+- 停止旧 facts 自动注入，旧档案通过有来源标记的只读查询访问。
+- 保留 Mood/Voice/Notebook/Body/Sense/Trigger。Dream 保留 Voice 与显式声明的 Notebook 自我原则晋升，拒绝事实晋升。
+- 增加 external 边界、旧档案不变及回退测试；不增加 Mnemon 内部接口依赖。
+
 ## [0.15.3] - 2026-10-26
 
 ### Added

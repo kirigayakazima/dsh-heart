@@ -1,6 +1,6 @@
 // dsh-heart 的 CLI：不装插件也能用。
-//   heart self                    打印「你自己」（本子 + 交接 + 最近记忆）
-//   heart write [-k notebook|memory|handoff] <内容>
+//   heart self [--legacy]         打印自身；external 可显式附带只读旧档案
+//   heart write [-k notebook|fact|memory] <内容>
 //   heart revise <原文片段> <改成什么>
 //   heart discard <原文片段>
 //   heart recall <关键词>
@@ -11,6 +11,7 @@ import {
   appendFact,
   appendMemory,
   appendNotebook,
+  assertLegacyMemory,
   dateOf,
   discardNotebook,
   exportBundleToFile,
@@ -22,6 +23,8 @@ import {
   resolveRoot,
   reviseNotebook,
   stats,
+  readMemoryMode,
+  writeHeartConfig,
 } from '../lib/store.js'
 
 const argv = process.argv.slice(2)
@@ -30,12 +33,13 @@ const device = process.env.HEART_DEVICE || 'agent'
 
 function usage() {
   console.error(`用法:
-  heart self                     打印「你自己」
+  heart self [--legacy]          external 时显式附带只读旧档案
   heart write [-k notebook|fact|memory] <内容>
   heart revise <原文片段> <改成什么>
   heart discard <原文片段>
   heart recall <关键词>
   heart body [voice|senses|hands]
+  heart mode [legacy|external]     查看/设置记忆职责（工具说明需重载宿主后更新）
   heart stats | export [文件] | import <文件> | migrate | root
 
 环境变量: HEART_ROOT(默认 ~/.dsh/heart)  HEART_DEVICE(默认 agent)`)
@@ -51,11 +55,12 @@ if (cmd === 'write' && argv[0] === '-k') {
 try {
   switch (cmd) {
     case 'self':
-      console.log(readSelf(root))
+      console.log(readSelf(root, { includeLegacy: argv.includes('--legacy') }))
       break
     case 'write': {
       const text = argv.join(' ').trim()
       if (!text) throw new Error('write 需要内容')
+      if (kind !== 'notebook' && readMemoryMode(root) === 'external') assertLegacyMemory(root)
       if (kind === 'memory') {
         const out = appendMemory(root, device, text)
         console.log(`已写入情节 ${out.file}`)
@@ -114,6 +119,10 @@ try {
       break
     case 'root':
       console.log(resolveRoot(root))
+      break
+    case 'mode':
+      if (argv[0]) writeHeartConfig(root, { memoryMode: argv[0] })
+      console.log(readMemoryMode(root))
       break
     default:
       usage()
