@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.20.0] - 2026-10-31
+
+### Added
+- **Heart Protocol v1 & 微内核架构演进**：
+  - 冻结 Heart 最小公共协议边界，建立独立 `contracts/` 目录并导出契约规范与校验器（`HEART_PROTOCOL_VERSION = '1.0.0'`）。
+  - 实现 Cordis `HeartService` 微内核服务，通过 `ctx.provide('heart', service)` 暴露标准服务能力。
+  - **只读快照**：`heart.getSnapshot()` 获取内部情绪（Mood 2.0 三维值与原因）、在线状态（presence）、空闲额度与版本信息，对象全冻结（Object.freeze）防篡改。
+  - **安全感知接入**：`heart.observe(input)` 接收外部事实性感知，严格禁止外部直写情绪三维数值（valence/arousal/energy/state），由 Heart 策略引擎依据置信度与事实证据映射至状态机，状态变更时触发通知。
+  - **活动适宜性评估**：`heart.evaluateActivity(intent)` 提供非紧急自主活动适宜性建议（检查安静时段、日额度/类别上限、疲惫心境劝阻），不承担外部执行授权。
+  - **Cordis 事件契约**：
+    - `heart/state-changed`：状态变更并发通知（提供 prev/current/eventSource），表达器官（Live2D、语音等）安全监听。
+    - `heart/idle`：空闲条件满足通知，习惯插件（bili-scroll 等）自主监听评估。
+  - **三种交互边界彻底厘清**：感知提交事实、通知单向广播、执行由各插件独立暴露服务与 DSH 工具（杜绝异步 consumed=true 竞争与假成功）。
+  - **跨设备感官扩展边界（FullAwake）**：手机 DSHA 为唯一主脑，PC Gateway 通过网络 Bridge/MCP 动态上线/下线能力，严格隔离阿醒数据。
+  - **架构负荷守恒**：零新增 LLM 模型工具（工具数量保持 18 个），系统提示词零膨胀。
+  - **全量测试与验收**：新增 Protocol v1 契约测试、HeartService 测试以及包含三大轻量模拟插件（Sensory, Voice, PC Bridge）的热插拔生命周期验收测试。全量 166/166 项自动化测试 100% 通过。
+
+
 ## [0.19.0] - 2026-10-30
 
 - 新增 root/config.json 的 legacy/external 记忆职责模式；默认 legacy。
