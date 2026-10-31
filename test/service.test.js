@@ -127,6 +127,8 @@ test('HeartService: 3. evaluateActivity() 评估自主活动适宜性（不承�
   const ctx = new MockCordisContext()
   const service = new HeartService(ctx, root, {
     device: 'phone',
+    quietFrom: '04:00',
+    quietTo: '04:00', // 禁用安静时段以确保日间活动判定不受深夜测试时钟影响
     idleTurnDailyCap: 4,
     idleCategories: [
       { id: 'bilibili', label: 'B站浏览', dailyCap: 2 },
