@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> **此仓库已正式合并入统一伴侣主仓 [LucidHeart](https://github.com/kirigayakazima/LucidHeart)。**  
+> 
+> 本仓库现已进入只读归档状态。后续最新代码、更新与维护均在主仓的 [`packages/heart`](https://github.com/kirigayakazima/LucidHeart/tree/main/packages/heart) 目录下进行。
+
+---
+
 # @dsh/heart (Heart Protocol v1 微内核)
 
 给 DSH（DeepSeek Harness）装一套**身体**和**心**。
